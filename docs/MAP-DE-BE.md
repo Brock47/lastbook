@@ -122,3 +122,6 @@ around the Brandenburg Gate.
   street name split in two (`Oranien Str. 25`), and building parts beyond one letter.
 - Eleven houses in Schmöckwitz and Rahnsdorf officially carry a Brandenburg postcode (155xx); they are kept as recorded.
 - The source has no postal place names beyond Berlin, so results read `10117 Berlin-Mitte` (postcode, city, locality).
+- A locality in the query (`Kreuzberg`) is matched after the index returns its first 500 houses with that street and
+  number. One city never comes near that; a national index with very common street names would need the locality
+  filtered inside SQLite instead.

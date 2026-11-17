@@ -1404,22 +1404,25 @@ def places(q, limit=20, near=None):
             return found
     if not PLACEDB.exists():
         return []
-    db = sqlite3.connect(ro_uri(PLACEDB), uri=True)
     words = re.findall(r'\w+', q)
     if not words:
         return []
     rows = []
     full = False
-    for ws in word_sets(words):
-        if full and len(ws) < len(words):
-            break  # every word matched somewhere: no need to loosen
-        if not ws:
-            continue
-        rows += db.execute('SELECT p.name,p.kind,p.detail,p.lat,p.lon,p.rank,p.source FROM place_fts f JOIN place p ON p.id=f.rowid '
-                           'WHERE place_fts MATCH ? ORDER BY p.rank, bm25(place_fts) LIMIT 200',
-                           (' '.join('"%s"*' % w.replace('"', '') for w in ws),)).fetchall()
-        if len(ws) == len(words):
-            full = bool(rows)
+    db = sqlite3.connect(ro_uri(PLACEDB), uri=True)
+    try:  # closed here, so the file can be removed or replaced afterwards (Windows refuses while it is open)
+        for ws in word_sets(words):
+            if full and len(ws) < len(words):
+                break  # every word matched somewhere: no need to loosen
+            if not ws:
+                continue
+            rows += db.execute('SELECT p.name,p.kind,p.detail,p.lat,p.lon,p.rank,p.source FROM place_fts f JOIN place p ON p.id=f.rowid '
+                               'WHERE place_fts MATCH ? ORDER BY p.rank, bm25(place_fts) LIMIT 200',
+                               (' '.join('"%s"*' % w.replace('"', '') for w in ws),)).fetchall()
+            if len(ws) == len(words):
+                full = bool(rows)
+    finally:
+        db.close()
     rows = list(dict.fromkeys(rows))
     def norm(t):
         return ' '.join(re.sub(r'\bsaint\b', 'st', re.sub(r'[^\w ]+', ' ', t.lower())).split())
