@@ -109,6 +109,7 @@ issue before any code.
 [REGIONS-LK.md](REGIONS-LK.md) does the same for Sri Lanka as one island-wide region.
 [REGIONS-TH.md](REGIONS-TH.md) does the same for Thailand's provinces and Bangkok.
 [REGIONS-DE.md](REGIONS-DE.md) does the same for Germany's 16 states.
+[MAP-DE-BE.md](MAP-DE-BE.md) builds one of them, Berlin, as a working offline map with addresses (`tools/build_region_de_be.py`).
 
 ## Checking a map change
 

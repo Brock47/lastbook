@@ -1045,7 +1045,7 @@ TILE_POI = {'hospital', 'clinic', 'doctors', 'pharmacy', 'chemist', 'fire_statio
 HELP = {'hospital': 'Hospital', 'clinic': 'Clinic', 'doctors': 'Doctor', 'pharmacy': 'Pharmacy', 'chemist': 'Pharmacy',
         'dentist': 'Dentist', 'fire_station': 'Fire station', 'police': 'Police', 'drinking_water': 'Drinking water tap',
         'fountain': 'Fountain (not necessarily drinkable)', 'water_tower': 'Water tower', 'water_works': 'Water works',
-        'spring': 'Spring (untested)', 'toilet': 'Public toilet', 'shelter': 'Shelter (structure)',
+        'spring': 'Spring (untested)', 'water_well': 'Water well / hand pump (untested)', 'toilet': 'Public toilet', 'shelter': 'Shelter (structure)',
         'community_centre': 'Community centre', 'town_hall': 'Town hall', 'school': 'School', 'library': 'Library',
         'supermarket': 'Supermarket', 'convenience': 'Convenience store', 'doityourself': 'Hardware / DIY store',
         'hardware': 'Hardware store', 'garden_centre': 'Garden centre', 'post_office': 'Post office',
