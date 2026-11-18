@@ -243,9 +243,15 @@ const Chat = (() => {
     return h;
   }
   function stepText(s) {
-    const a = s.args || {}, r = s.summary || {};
+    // s.args is the model's own tool call, as it sent it: use only plain text and numbers from it, never convert anything else.
+    const plain = v => typeof v === 'string' || typeof v === 'number' ? v : '';
+    const raw = s.args && typeof s.args === 'object' ? s.args : {}, r = s.summary || {};
+    const a = { query: plain(raw.query), kind: plain(raw.kind), doc_id: plain(raw.doc_id), page: plain(raw.page), pages: raw.pages };
     if (s.name === 'search_library') return `Searched “${esc(a.query || '')}”${a.kind && a.kind !== 'any' ? ' (' + esc(a.kind) + 's)' : ''} — ${r.count ?? '…'} passage${r.count === 1 ? '' : 's'}`;
-    if (s.name === 'read_pages') return r.error ? 'Tried to read an unknown document' : `Read ${esc(r.title || a.doc_id)}, page${(a.pages || []).length > 1 ? 's' : ''} ${(a.pages || []).join(', ')}`;
+    if (s.name === 'read_pages') {
+      const pages = (Array.isArray(a.pages) ? a.pages : [a.pages]).filter(p => typeof p === 'number' || typeof p === 'string');
+      return r.error ? 'Tried to read an unknown document' : `Read ${esc(r.title || a.doc_id)}, page${pages.length > 1 ? 's' : ''} ${esc(pages.join(', '))}`;
+    }
     if (s.name === 'view_page') return r.error ? 'Couldn’t view that page' : `Looked at the picture of ${esc(r.title || '')}, page ${esc(a.page)}`;
     if (s.name === 'get_timed_transcript') return r.error ? `No transcript for ${esc(r.title || 'that video')}` : `Read the transcript of ${esc(r.title || '')}`;
     if (s.name === 'lookup_place') return `Looked up “${esc(a.query || '')}” on the offline map`;
@@ -278,15 +284,40 @@ const Chat = (() => {
     const inline = s => esc(s).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/(^|\W)\*(?!\s)(.+?)\*(?=\W|$)/g, '$1<em>$2</em>')
       .replace(/\[([SM]\d+)\]/g, (_, k) => cite(k));
     const lines = text.replace(/\r/g, '').split('\n');
-    let out = '', list = null, section = 'main';
+    let out = '', list = null, section = 'main', table = null, before = '';
     const close = () => { if (list) { out += `</${list}>`; list = null } };
+    // A table the model copied from a source. It counts as cited when a key is in it or in the line just before it, as the instructions ask.
+    // Cells split on bare pipes only: "\|" is a pipe inside a cell.
+    const cells = r => {
+      const s = r.replace(/^\|/, '').replace(/(?<!\\)\|$/, ''), c = [];
+      let cur = '';
+      for (let i = 0; i < s.length; i++) {
+        if (s[i] === '\\' && s[i + 1] === '|') { cur += '|'; i++ } else if (s[i] === '|') { c.push(cur.trim()); cur = '' } else cur += s[i];
+      }
+      c.push(cur.trim());
+      return c;
+    };
+    const SEP = /^\|?(\s*:?-{2,}:?\s*\|)*\s*:?-{2,}:?\s*\|?$/;
+    const flush = () => {
+      if (!table) return;
+      const head = table.length > 1 && SEP.test(table[1]) ? cells(table[0]) : null, rows = table.slice(head ? 2 : 0).filter(r => !SEP.test(r)).map(cells);
+      const cited = section !== 'main' || m.running || /\[[SM]\d+\]/.test(table.join(' ') + ' ' + before);
+      const no = cited ? '' : ' title="Not linked to a source"', width = head ? head.length : (rows[0] || []).length;
+      // A row with more or fewer cells than the header would put numbers under the wrong heading, so show the lines as written.
+      if (rows.some(r => r.length !== width)) out += `<p class="ans-raw${cited ? '' : ' uncited'}"${no}>${table.map(inline).join('<br>')}</p>`;
+      else out += `<div class="ans-table${cited ? '' : ' uncited'}"${no}><table>${head ? `<thead><tr>${head.map(c => `<th>${inline(c)}</th>`).join('')}</tr></thead>` : ''}<tbody>${rows.map(r => `<tr>${r.map(c => `<td>${inline(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+      table = null; before = '';  // a key before one table says nothing about the next
+    };
     const mark = raw => {  // wrap sentences that carry no citation (main sections only)
       if (section !== 'main' || m.running) return inline(raw);
       return raw.split(/(?<=[.!?])\s+(?=[A-Z(“"])/).map(sn => /\[[SM]\d+\]/.test(sn) || sn.replace(/\*|_/g, '').trim().length < 28 || /:$/.test(sn.trim()) ? inline(sn) : `<span class="uncited" title="Not linked to a source">${inline(sn)}</span>`).join(' ');
     };
     for (let ln of lines) {
       const t = ln.trim();
-      if (!t) { close(); continue }
+      if (/^\|.*\|$/.test(t)) { close(); (table = table || []).push(t); continue }
+      flush();
+      if (!t) { close(); before = ''; continue }
+      before = t;
       const head = /^#{1,4}\s+(.*)$/.exec(t) || /^\*\*([^*]+:)\*\*$/.exec(t) || /^\*\*([^*]+)\*\*:?$/.exec(t);
       const hText = head ? head[1] : '';
       const sec = /not found in the library/i.test(t) ? 'missing' : /sources disagree/i.test(t) ? 'disagree' : /own reasoning/i.test(t) ? 'reasoning' : null;
@@ -305,7 +336,7 @@ const Chat = (() => {
       }
       close(); out += `<p>${mark(t)}</p>`;
     }
-    close();
+    flush(); close();
     if (out.includes('<div class="sec-')) out += '</div>';
     return out;
   }

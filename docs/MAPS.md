@@ -109,7 +109,12 @@ issue before any code.
 [REGIONS-LK.md](REGIONS-LK.md) does the same for Sri Lanka as one island-wide region.
 [REGIONS-TH.md](REGIONS-TH.md) does the same for Thailand's provinces and Bangkok.
 [REGIONS-DE.md](REGIONS-DE.md) does the same for Germany's 16 states.
-[MAP-DE-BE.md](MAP-DE-BE.md) builds one of them, Berlin, as a working offline map with addresses (`tools/build_region_de_be.py`).
+[REGIONS-PY.md](REGIONS-PY.md) does the same for Paraguay as one country-wide region.
+[REGIONS-IE.md](REGIONS-IE.md) does the same for the island of Ireland, including Northern Ireland, as one region.
+[REGIONS-GB-LONDON.md](REGIONS-GB-LONDON.md) does the same for Greater London as one region.
+[REGIONS-ES.md](REGIONS-ES.md) does the same for Spain's 17 autonomous communities and its two autonomous cities.
+[REGIONS-FR.md](REGIONS-FR.md) does the same for France's 18 regions, with figures from a trial build.
+[MAP-DE-BE.md](MAP-DE-BE.md) builds one of the German states, Berlin, as a working offline map with addresses (`tools/build_region_de_be.py`).
 
 ## Checking a map change
 
