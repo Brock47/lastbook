@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Berlin (DE-BE): a self-contained offline map set with places, help points and street addresses.
 
-  python3 tools/build_region_de_be.py fetch    # downloads the sources (about 160 MB) into derived/regions/DE-BE/source/
+  python3 tools/build_region_de_be.py fetch    # downloads the sources (about 270 MB) into derived/regions/DE-BE/source/
   python3 tools/build_region_de_be.py build    # writes the data folder derived/regions/DE-BE/data/
   python3 tools/build_region_de_be.py check    # validates it; exits non-zero on any failure
   python3 tools/build_region_de_be.py demo     # adds an empty library beside it, then prints the command below
