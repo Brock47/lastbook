@@ -1,4 +1,5 @@
 """Offline address lookup must preserve house numbers and geographic qualifiers."""
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -7,6 +8,23 @@ from unittest.mock import patch
 
 from engine.address_search import (find_addresses, is_address_query, is_german_address_query, is_german_postcode_query,
                                    normalize, normalize_de)
+
+
+class CountingConnection:
+    """Wraps a sqlite3 connection and records how many rows each query's cursor hands back to Python."""
+
+    def __init__(self, connection, fetched):
+        self.connection = connection
+        self.fetched = fetched
+
+    def execute(self, sql, parameters=()):
+        self.fetched.append(0)
+        for row in self.connection.execute(sql, parameters):
+            self.fetched[-1] += 1
+            yield row
+
+    def close(self):
+        self.connection.close()
 
 
 class AddressSearchTests(unittest.TestCase):
@@ -26,7 +44,11 @@ class AddressSearchTests(unittest.TestCase):
             ('12', 'Oak Court', 'Example', 'CA', '90001', 34.02, -118.02),
             ('100', 'Main Street', 'Inglewood', 'CA', '90301', 33.96, -118.35),
             ('100', 'Main Street', 'Newport Beach', 'CA', '92661', 33.60, -117.90),
+            ('123', 'Main Street', 'North Hollywood', 'CA', '91601', 34.16, -118.37),
+            ('123', 'North Main Street', 'North Hollywood', 'CA', '91601', 34.17, -118.38),
         ])
+        self.write_state('MN', [('10', 'Oak Avenue', 'Saint Paul', 'MN', '55101', 44.95, -93.09)])
+        self.write_state('MO', [('10', 'Oak Avenue', 'St. Louis', 'MO', '63101', 38.63, -90.20)])
 
     def tearDown(self):
         self.temp.cleanup()
@@ -107,6 +129,27 @@ class AddressSearchTests(unittest.TestCase):
         result = find_addresses('21 ninth st Example CA', self.geo)
         self.assertEqual(result[0]['name'], '21 W 9 ST')
 
+    def test_city_with_direction_or_saint_matches_stored_title_case(self):
+        result = find_addresses('123 Main St North Hollywood', self.geo)
+        self.assertIn('123 Main Street', [row['name'] for row in result])
+        result = find_addresses('123 North Main Street North Hollywood CA', self.geo)
+        self.assertEqual(result[0]['name'], '123 North Main Street')
+        self.assertEqual(find_addresses('123 Main St Hollywood North', self.geo), [])
+        for query in ('10 Oak Ave Saint Paul MN', '10 Oak Ave St Paul MN', '10 Oak Ave Saint Paul'):
+            with self.subTest(query=query):
+                result = find_addresses(query, self.geo)
+                self.assertEqual(len(result), 1)
+                self.assertEqual(result[0]['name'], '10 Oak Avenue')
+                self.assertEqual(result[0]['detail'], 'Saint Paul, MN, 55101')
+
+    def test_city_punctuation_is_ignored(self):
+        for query in ('10 Oak Ave St Louis MO', '10 Oak Ave Saint Louis MO', '10 Oak Ave St. Louis MO'):
+            with self.subTest(query=query):
+                result = find_addresses(query, self.geo)
+                self.assertEqual(len(result), 1)
+                self.assertEqual(result[0]['detail'], 'St. Louis, MO, 63101')
+        self.assertEqual(find_addresses('10 Oak Ave Saint Louis Park MO', self.geo), [])
+
     def test_plain_zip_remains_place_query(self):
         self.assertFalse(is_address_query('48375'))
         self.assertFalse(is_address_query('Novi MI'))
@@ -124,6 +167,49 @@ class AddressSearchTests(unittest.TestCase):
         finally:
             db.close()      # as in write_state: the `with` form does not close, and Windows will not remove an open file
         self.assertEqual(find_addresses('23001 Maple Ave Kansas City MO', empty)[0]['lat'], 39.0997)
+
+    def test_null_city_row_does_not_break_city_query(self):
+        self.write_state('OH', [
+            ('5', 'Elm Street', None, 'OH', '43001', 40.0, -83.0),
+            ('5', 'Elm Street', 'Columbus', 'OH', '43215', 39.96, -83.0),
+        ])
+        result = find_addresses('5 elm Columbus OH', self.geo)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]['detail'], 'Columbus, OH, 43215')
+
+    def test_city_query_fetches_only_rows_it_can_keep(self):
+        # Same number and street in other cities: only the first-letter prefilter should keep them out of Python.
+        self.write_state('IL', [('100', 'Main Street', 'Springfield', 'IL', '62701', 39.80, -89.64)])
+        self.write_state('NV', [('100', 'Main Street', 'Boston', 'NV', '89501', 39.5, -119.8)] * 300)
+        fetched = []
+        real_connect = sqlite3.connect
+        with patch('engine.address_search.sqlite3.connect',
+                   side_effect=lambda *args, **kwargs: CountingConnection(real_connect(*args, **kwargs), fetched)):
+            result = find_addresses('100 main springfield', self.geo)
+        self.assertEqual(result[0]['detail'], 'Springfield, IL, 62701')
+        self.assertLessEqual(sum(fetched), 10)
+
+    def test_city_match_is_not_crowded_out_by_same_first_letter_rows(self):
+        self.write_state('IL', [('100', 'Main Street', 'Sparks', 'IL', '62702', 39.5, -119.7)] * 160
+                         + [('100', 'Main Street', 'Springfield', 'IL', '62701', 39.80, -89.64)])
+        result = find_addresses('100 Main Street Springfield IL', self.geo)
+        self.assertEqual([row['detail'] for row in result], ['Springfield, IL, 62701'])
+
+    def test_city_query_stops_reading_once_it_has_enough_matches(self):
+        self.write_state('IL', [('100', 'Main Street', 'Springfield', 'IL', '62701', 39.80, -89.64)] * 300)
+        fetched = []
+        real_connect = sqlite3.connect
+        with patch('engine.address_search.sqlite3.connect',
+                   side_effect=lambda *args, **kwargs: CountingConnection(real_connect(*args, **kwargs), fetched)):
+            result = find_addresses('100 main springfield', self.geo)
+        self.assertEqual(result[0]['detail'], 'Springfield, IL, 62701')
+        self.assertLessEqual(max(fetched), 8 * 3)
+
+    def test_partial_city_prefix_matches_direction_and_saint_cities(self):
+        result = find_addresses('123 Main St Nort CA', self.geo)
+        self.assertEqual(result[0]['detail'], 'North Hollywood, CA, 91601')
+        result = find_addresses('10 Oak Ave Sain MN', self.geo)
+        self.assertEqual(result[0]['detail'], 'Saint Paul, MN, 55101')
 
     def test_app_route_preserves_address_number(self):
         import server
@@ -346,32 +432,20 @@ class OntarioAddressTests(unittest.TestCase):
         """Canada writes unit 4 at number 120 as "4-120"; today "4-120" is read as the house number."""
         self.assertFinds('4-120 Exemplar St E', '120 Exemplar Street East', 44.10)
 
-    @unittest.expectedFailure
     def test_city_with_ste(self):
-        """The query's city is normalized ("ste marie"), the stored one is not ("ste. marie"). #196 compares both
-        normalized."""
+        """The query's city is normalized ("ste marie"), the stored one is not ("ste. marie"): both are compared normalized."""
         for query in ('45 Exemplar Rd Sault Ste Marie', '45 Exemplar Rd Sault Ste. Marie'):
             with self.subTest(query=query):
                 self.assertFinds(query, '45 Exemplar Road', 46.50)
 
-    @unittest.expectedFailure
     def test_city_with_st(self):
         for query in ('46 Exemplar Rd St Catharines', '46 Exemplar Rd St. Catharines', '46 Exemplar Rd Saint Catharines'):
             with self.subTest(query=query):
                 self.assertFinds(query, '46 Exemplar Road', 43.15)
 
 
-BERLIN_SOURCE = 'Geoportal Berlin, Adressen Berlin (dl-de/zero-2.0)'
-BERLIN = [
-    ('77', 'Unter den Linden', '10117', 'Mitte', 52.5170, 13.3888),
-    ('12', 'Müllerstraße', '13353', 'Wedding', 52.5480, 13.3600),
-    ('12A', 'Müllerstraße', '13353', 'Wedding', 52.5481, 13.3601),
-    ('135', 'Straße des 17. Juni', '10623', 'Tiergarten', 52.5130, 13.3270),
-    ('25', 'Oranienstraße', '10999', 'Kreuzberg', 52.5010, 13.4190),
-    ('5', 'Hauptstraße', '10827', 'Schöneberg', 52.4880, 13.3530),
-    ('5', 'Hauptstraße', '12589', 'Rahnsdorf', 52.4400, 13.6900),
-    ('77', 'Lindenstraße', '10969', 'Kreuzberg', 52.5030, 13.3980),
-]
+FIXTURE = json.loads((Path(__file__).resolve().parent / 'fixtures' / 'de_be_queries.json').read_text(encoding='utf-8'))
+BERLIN = FIXTURE['address_rows']        # the German query cases shared with the builder (tools/build_region_de_be.py)
 
 
 class GermanAddressSearchTests(unittest.TestCase):
@@ -381,23 +455,24 @@ class GermanAddressSearchTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.geo = Path(self.temp.name)
         (self.geo / 'addresses').mkdir()
-        self.write_berlin(self.geo / 'addresses' / 'DE-BE.sqlite')
+        self.write_berlin(self.geo / 'addresses' / FIXTURE['index_filename'])
 
     def tearDown(self):
         self.temp.cleanup()
 
     @staticmethod
-    def write_berlin(path, rows=BERLIN, source=BERLIN_SOURCE):
-        """The DE-BE index contract: a district column and meta norm 'de-1' with its own source line."""
+    def write_berlin(path, rows=BERLIN):
+        """The DE-BE index contract from the fixture: a district column and meta norm 'de-1' with its own source line."""
         db = sqlite3.connect(path)
         try:
             db.execute('CREATE TABLE addr(num TEXT,street TEXT,norm TEXT,city TEXT,state TEXT,zip TEXT,lat REAL,lon REAL,district TEXT)')
             db.execute('CREATE INDEX addr_norm ON addr(norm,num)')
             db.execute('CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT)')
             db.executemany('INSERT INTO addr VALUES(?,?,?,?,?,?,?,?,?)',
-                           [(num, street, normalize_de(street), 'Berlin', 'DE-BE', z, lat, lon, district)
-                            for num, street, z, district, lat, lon in rows])
-            db.executemany('INSERT INTO meta VALUES(?,?)', [('norm', 'de-1'), ('source', source)])
+                           [(row['num'], row['street'], row['norm'], row['city'], row['state'], row['zip'], row['lat'], row['lon'],
+                             row['district']) for row in rows])
+            db.executemany('INSERT INTO meta VALUES(?,?)', [('region', FIXTURE['region']), ('norm', FIXTURE['norm']),
+                                                            ('source', rows[0]['source'])])
             db.commit()
         finally:
             db.close()      # as in AddressSearchTests.write_state: Windows will not remove an open file
@@ -418,53 +493,46 @@ class GermanAddressSearchTests(unittest.TestCase):
         self.assertEqual(len(result), 1, query)
         return result[0]
 
-    def test_street_then_number_with_optional_postcode_and_city(self):
-        """The plain German order, with or without the postcode line, finds the house and names it the German way."""
-        for query in ('Unter den Linden 77', 'unter den linden 77, 10117 Berlin', 'Unter den Linden 77 10117'):
-            with self.subTest(query=query):
-                hit = self.one(query)
-                self.assertEqual(hit['name'], 'Unter den Linden 77')
-                self.assertEqual(hit['detail'], '10117 Berlin-Mitte')
-                self.assertEqual(hit['lat'], 52.5170)
-                self.assertEqual(hit['kind'], 'Street address')
-                self.assertEqual(hit['source'], BERLIN_SOURCE)     # credit the index's own source, not Overture
-
-    def test_umlaut_sharp_s_and_str_abbreviation_spellings_meet(self):
-        """People type ß, ss, ü, ue and 'str.' interchangeably; all must reach house 12A and never plain 12."""
-        for query in ('Müllerstr. 12a', 'Müllerstraße 12 a', 'Muellerstrasse 12A', 'MÜLLERSTRASSE 12A, 13353 Berlin'):
-            with self.subTest(query=query):
-                hit = self.one(query)
-                self.assertEqual(hit['name'], 'Müllerstraße 12A')
-                self.assertEqual(hit['lat'], 52.5481)
+    def test_fixture_queries_find_exactly_the_expected_houses(self):
+        """Every German query in the shared fixture: street first, umlaut and 'Str.' spellings, a suffix letter, a number
+        inside the street name, an optional postcode, city or Ortsteil. Each finds exactly its expected houses, named
+        the German way and credited to the index's own source; an unknown number or a wrong place finds nothing."""
+        rows = {row['id']: row for row in BERLIN}
+        for case in FIXTURE['address_queries'] + FIXTURE['no_house_queries']:
+            with self.subTest(query=case['query']):
+                found = find_addresses(case['query'], self.geo)
+                expected = [rows[key] for key in case['expected_fixture_ids']]
+                self.assertCountEqual([(hit['lat'], hit['lon']) for hit in found], [(row['lat'], row['lon']) for row in expected])
+                for hit in found:
+                    row = next(row for row in expected if (row['lat'], row['lon']) == (hit['lat'], hit['lon']))
+                    self.assertEqual(hit['name'], f"{row['street']} {row['num']}")
+                    self.assertEqual(hit['detail'], f"{row['zip']} {row['city']}-{row['district']}")
+                    self.assertEqual((hit['kind'], hit['source']), ('Street address', row['source']))   # not Overture
+                    if 'expected_name' in case:
+                        self.assertEqual(hit['name'], case['expected_name'])
+                    if 'expected_detail' in case:
+                        self.assertEqual(hit['detail'], case['expected_detail'])
 
     def test_normalize_de_scheme(self):
-        """The builder imports this function, so its output is the stored norm column and must follow scheme de-1."""
-        self.assertEqual(normalize_de('Müllerstraße'), 'muellerstr')
+        """Indexes store normalize_de(street) in their norm column. The builder keeps its own copy so the data half needs
+        nothing from engine/; both must give the stored key, or a house would be in the index and never found."""
+        from tools.build_region_de_be import normalize_de as builder_normalize_de
+        for example in FIXTURE['normalization_examples']:
+            with self.subTest(text=example['input']):
+                self.assertEqual(normalize_de(example['input']), example['expected'])
+        for text in [row['street'] for row in BERLIN] + [example['input'] for example in FIXTURE['normalization_examples']] + [
+                'Karl-Marx-Str.', 'Hauptstrasse', 'Müllerstraße', 'Ärztehaus Göhrener Straße', '']:
+            with self.subTest(text=text):
+                self.assertEqual(normalize_de(text), builder_normalize_de(text))
         self.assertEqual(normalize_de('Straße des 17. Juni'), 'str des 17 juni')
-        self.assertEqual(normalize_de('Karl-Marx-Str.'), 'karl marx str')
-        self.assertEqual(normalize_de('Hauptstrasse'), normalize_de('Hauptstraße'))
         self.assertEqual(normalize('18001 W Nine Mile Road'), '18001 w nine mile rd')      # the US scheme is untouched
 
-    def test_number_inside_street_name_is_not_the_house_number(self):
-        """'Straße des 17. Juni 135': the house is the last number, the 17 belongs to the street."""
-        hit = self.one('Straße des 17. Juni 135')
-        self.assertEqual(hit['name'], 'Straße des 17. Juni 135')
-        self.assertEqual(find_addresses('Straße des 17. Juni', self.geo), [])
-
-    def test_district_or_city_qualifier_filters_like_the_us_city(self):
-        """A trailing Ortsteil or city narrows the street to that place, prefix-matched, and a wrong one finds nothing."""
-        self.assertEqual(self.one('Oranienstraße 25 Kreuzberg')['detail'], '10999 Berlin-Kreuzberg')
-        self.assertEqual(self.one('Oranienstr 25 kreuz')['lat'], 52.5010)
-        self.assertEqual(self.one('Hauptstraße 5 Schöneberg')['detail'], '10827 Berlin-Schöneberg')
-        self.assertEqual(self.one('Hauptstraße 5 Berlin-Rahnsdorf')['detail'], '12589 Berlin-Rahnsdorf')
-        self.assertEqual(len(find_addresses('Hauptstraße 5 Berlin', self.geo)), 2)
-        self.assertEqual(find_addresses('Oranienstraße 25 Spandau', self.geo), [])
-        self.assertEqual(find_addresses('Oranienstraße 25, 10117 Berlin', self.geo), [])
-
-    def test_unknown_number_does_not_return_nearby_house(self):
-        """Exact house numbers only: 78 must not fall back to 77, and 12B not to 12 or 12A."""
-        self.assertEqual(find_addresses('Unter den Linden 78', self.geo), [])
-        self.assertEqual(find_addresses('Müllerstraße 12b', self.geo), [])
+    def test_fixture_place_queries_are_not_addresses(self):
+        """'10117 Berlin', 'Kreuzberg', 'Straße des 17. Juni' or 'Route 66' name places: no address may answer them."""
+        for case in FIXTURE['place_queries']:
+            with self.subTest(query=case['query']):
+                self.assertTrue(case['must_not_be_address'])
+                self.assertEqual(find_addresses(case['query'], self.geo), [])
 
     def test_postcode_city_and_district_alone_stay_place_queries(self):
         """'10117 Berlin', 'Berlin' and 'Kreuzberg' name places; treating them as addresses would hide the place."""

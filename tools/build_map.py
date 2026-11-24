@@ -3,9 +3,6 @@
 map database the app can draw offline.
 
   python3 tools/build_map.py derived/geo/socal.gpkg derived/geo/map.sqlite
-  python3 tools/build_map.py SRC.gpkg DST.sqlite --source '...' --as-of 2026-11-16T21:22:36Z --bounds W,S,E,N   # another region
-
-Without the three options the metadata is the Southern California build's, as before.
 
 Input is a copy extracted from library-data/geography/openstreetmap/socal-latest-free.gpkg.zip;
 the original archive is only read. Output tables:
@@ -14,19 +11,10 @@ the original archive is only read. Output tables:
   poi(id, cls, name, lon, lat)             help-relevant points (hospitals, pharmacies, water...)
   meta(key, value)
 """
-import argparse, math, sqlite3, struct, time
+import math, sqlite3, struct, sys, time
 from array import array
 
-_ap = argparse.ArgumentParser()
-_ap.add_argument('src')
-_ap.add_argument('dst')
-_ap.add_argument('--source', default='OpenStreetMap contributors, via Geofabrik socal-latest-free.gpkg.zip (ODbL 1.0)')
-_ap.add_argument('--as-of', default='2026-10-25T21:21:21Z', help='the extract\'s data date (Geofabrik "contains all OSM data up to")')
-_ap.add_argument('--bounds', default='-121.36,32.50,-114.10,35.89', help='W,S,E,N of the area the extract covers')
-_ap.add_argument('--extra-poi', default='', help='comma-separated point classes to keep besides POI_KEEP, e.g. water_well')
-ARGS = _ap.parse_args()
-SRC, DST = ARGS.src, ARGS.dst
-EXTRA_POI = {c for c in ARGS.extra_poi.split(',') if c}
+SRC, DST = sys.argv[1], sys.argv[2]
 Q = 1e6
 
 ROAD_Z = {'motorway': 5, 'trunk': 6, 'motorway_link': 10, 'trunk_link': 10, 'primary': 8, 'primary_link': 12,
@@ -199,7 +187,7 @@ def main():
     pid = 0
     for table in ('gis_osm_pois_free', 'gis_osm_pois_a_free', 'gis_osm_natural_free', 'gis_osm_natural_a_free'):
         for parts, (cls, name) in each(table):
-            if cls not in POI_KEEP and cls not in EXTRA_POI:
+            if cls not in POI_KEEP:
                 continue
             if table == 'gis_osm_natural_free' and cls not in ('spring',):
                 continue
@@ -208,9 +196,9 @@ def main():
             dst.execute('INSERT INTO poi VALUES (?,?,?,?,?)', (pid, cls, name, (minx + maxx) / 2, (miny + maxy) / 2))
     dst.execute('CREATE INDEX poi_cls ON poi(cls, lon, lat)')
     dst.executemany('INSERT INTO meta VALUES (?,?)', [
-        ('source', ARGS.source),
-        ('data_as_of', ARGS.as_of),
-        ('bounds', ARGS.bounds),
+        ('source', 'OpenStreetMap contributors, via Geofabrik socal-latest-free.gpkg.zip (ODbL 1.0)'),
+        ('data_as_of', '2026-10-25T21:21:21Z'),
+        ('bounds', '-121.36,32.50,-114.10,35.89'),
         ('built', time.strftime('%Y-%m-%dT%H:%M:%S')),
     ])
     dst.commit()

@@ -1,26 +1,33 @@
 # Berlin (DE-BE): a working offline map
 
-The first map outside the United States: streets, named places, help points and street addresses for Berlin, built
-from redistributable sources by one command, kept in its own folder, and searchable offline. It follows the plan in
-[REGIONS-DE.md](REGIONS-DE.md) and the file formats in [MAPS.md](MAPS.md). The region keeps its full ID, `DE-BE`: a bare
-`DE` means Delaware.
+Streets, named places, help points and street addresses for Berlin, built from redistributable sources by one command
+and kept in its own folder; its places are searchable offline, and its addresses form an index ready for a German
+address search. It follows the plan in [REGIONS-DE.md](REGIONS-DE.md) and the file formats in [MAPS.md](MAPS.md). The
+region keeps its full ID, `DE-BE`: a bare `DE` means Delaware.
 
-This is a builder and a testable map set, not an installer: the shared region download is still being designed, so
-nothing here touches `packaging/`, the release manifest or the setup flow.
+The builder is the data half (#433): it runs `tools/build_map.py` unchanged and needs nothing from the app. The app
+reads the address index the German way and draws the street pumps (#79): `engine/address_search.py` searches an index
+whose `meta` says `norm = de-1` with the German rule and every other index with the US rule, and the map has a hand-pump
+layer. Both halves share the query cases in `app/tests/fixtures/de_be_queries.json`. Installing the index from Setup
+waits for the shared address-index IDs coordinated with the other regions in #31 and #25.
 
 ## Build it
 
 ```sh
 python3 tools/build_region_de_be.py fetch    # downloads the sources, about 270 MB, into derived/regions/DE-BE/source/
-python3 tools/build_region_de_be.py build    # writes derived/regions/DE-BE/data/ (about 25 s)
+python3 tools/build_region_de_be.py build    # builds beside the last build, replaces data/ once it passes check (about a minute)
 python3 tools/build_region_de_be.py check    # validates it; exits non-zero on any failure
 python3 tools/build_region_de_be.py demo     # adds an empty library beside it for trying the map alone
 python3 server.py --data derived/regions/DE-BE/demo --no-index
 ```
 
 Python 3.9 or newer and its standard library; no GDAL, no other packages. `fetch` is the only step that uses the
-network. Everything is written under `derived/regions/DE-BE/`, so no existing map set changes. `build.json` there
-records every source (URL, dated file name, data date, licence, size, SHA-256) and every output (size, SHA-256).
+network. Everything is written under `derived/regions/DE-BE/`, so no existing map set changes. `data/build.json`
+records every source (URL, dated file name, data date, licence, size, SHA-256) and every other output (size, SHA-256).
+
+`build` writes into `data.new/` and runs `check` on it; only if every check passes does it take the place of `data/`.
+A rebuild that fails, or fails its checks, leaves the previous `data/` and its `build.json` as they were (a failed build
+stays in `data.new/` to look at, and the next build clears it).
 
 ## Sources
 
@@ -42,21 +49,22 @@ the public register. Everything else, including street hand pumps, comes from Op
 
 ## What the build holds
 
-Built on 17 November 2026 from OpenStreetMap data of 16 November 2026 (`berlin-261116-free.gpkg.zip`) and the
-Geoportal services as served that morning. A full `fetch`, `build`, `check` took under two minutes.
+Built on 23 November 2026 from the sources fetched on 17 November 2026: OpenStreetMap data of 16 November 2026
+(`berlin-261116-free.gpkg.zip`) and the Geoportal services as served that morning. On 17 November a full `fetch`,
+`build`, `check` took under two minutes.
 
 | File | Size | SHA-256 (this build) | Holds |
 |---|---|---|---|
-| `derived/geo/national.sqlite` | 188.1 MB | `f92fdce0…0c457` | 467,739 road features plus water, land, rail, buildings and places; 21,000-odd help and supply points |
+| `derived/geo/national.sqlite` | 188.1 MB | `c2b77fa2…9d34e` | 467,739 road features plus water, land, rail, buildings and places; 21,000-odd help and supply points |
 | `derived/geo/map.sqlite` | 32 KB | `5d421123…650dd` | empty, as in a US state map; carries the map's source and date |
-| `derived/geo/places.sqlite` | 3.3 MB | `1105067b…3f38` | 12 districts, 97 localities, 193 postcode areas, 11,321 streets, 13,488 named points, 196 named places |
-| `derived/geo/addresses/DE-BE.sqlite` | 51.6 MB | `5e152e53…3965` | 404,303 addresses; a sidecar, as the US address indexes are |
+| `derived/geo/places.sqlite` | 3.3 MB | `4b59f374…f30d9` | 12 districts, 97 localities, 193 postcode areas, 11,321 streets, 13,488 named points, 196 named places |
+| `derived/geo/addresses/DE-BE.sqlite` | 51.6 MB | `d06f25d7…5a4b2` | 404,303 addresses; a sidecar, as the US address indexes are |
 | `map-set.json` | 191 B | | name `DE-BE` and the sizes of the map files |
 
 Help points: 111 hospitals, 702 pharmacies, 102 fire stations and 37 police stations from the Geoportal (replacing
 59, 685, 103 and 68 OpenStreetMap points), and 2,080 street hand pumps from OpenStreetMap.
 
-Full checksums are in `build.json`. They identify one build: the map and address files record their build time, so two
+Full checksums are in `data/build.json`. They identify one build: the map and address files record their build time, so two
 builds of the same sources differ in those bytes, not in content.
 
 ## Checks
@@ -68,39 +76,47 @@ builds of the same sources differ in those bytes, not in content.
 - streets are present, and each help kind has a plausible count (hospitals, pharmacies, fire stations, police, pumps);
 - every help point and address lies inside Berlin's box from `regions-de-proposed.json`, and every address has a
   five-digit postcode;
-- three addresses are found through `engine/address_search.py` exactly, and an unknown house number returns nothing;
-- the place finder has a locality, a district, a postcode area and a street.
+- the address index says `region = DE-BE` and `norm = de-1` in its `meta`, its row count matches, and every stored
+  street key is `normalize_de(street)`;
+- three public buildings are in the index exactly once with their postcode and locality (Unter den Linden 77, Platz der
+  Republik 1, Straße des 17. Juni 135);
+- the place finder has a locality, a district, a postcode area and a street, and labels every official help point
+  with its source, Geoportal Berlin.
+
+`check` reads the files with SQL only and imports nothing from the app, so it says nothing about how the app searches
+them; `app/tests/test_address_search.py` runs every query in the fixture against the app's search.
+`app/tests/test_build_region_de_be.py` runs offline: the `de-1` spellings, the stored house-number form, the
+fixtures' consistency, that each pump lands exactly where `tools/build_map.py` puts a point, that each place names the
+source it came from, and that a rebuild which fails, or fails its checks, leaves the previous output in place.
 
 ## Try it
 
 With the demo server running, the map opens over the US; go to Berlin with
-`http://127.0.0.1:8890/#/map?lat=52.5163&lon=13.39&z=15&layers=hospital,pharmacy,fire,police,pump`.
+`http://127.0.0.1:8890/#/map?lat=52.5163&lon=13.39&z=15&layers=hospital,pharmacy,fire,police`.
+
+With only this map set installed:
 
 | Search | Result |
 |---|---|
-| `Unter den Linden 77, 10117 Berlin` | Unter den Linden 77, 10117 Berlin-Mitte |
-| `Oranienstraße 25 Kreuzberg` | Oranienstraße 25, 10999 Berlin-Kreuzberg |
-| `Müllerstr. 12a` | every Müllerstraße 12A in Berlin |
-| `Straße des 17. Juni 135` | that house: the 17 stays part of the street name |
-| `Unter den Linden 99999` | no house is guessed; the street itself is offered |
-| `Kreuzberg`, `10117 Berlin`, `Oranienstraße` | the locality, the postcode area, the street |
-| `Route 66` | still a place search, as before |
+| `Unter den Linden 77`, `Unter den Linden 77, 10117 Berlin`, `Straße des 17. Juni 135` | the house, named the German way (`Unter den Linden 77`, `10117 Berlin-Mitte`) and credited to Geoportal Berlin |
+| `Müllerstraße 12`, `Muellerstr. 12` | both houses of that number: Müllerstraße runs through Wedding and Mahlsdorf |
+| `Unter den Linden 9999` | the street, never a nearby house |
+| `Kreuzberg`, `10117`, `10117 Berlin`, `Oranienstraße`, `Alexanderplatz` | the locality, the postcode area, the street |
+| `Route 66` | `Straße 66` in Karow, a real numbered Berlin street: with no such house the place search answers |
+| `77 Unter den Linden`, `25 Oranienstr` | nothing: the number first is the US order, and a German index is searched only the German way |
 
-`/api/map/near?lat=52.5163&lon=13.3777&cls=hospital,pharmacy,fire_station,police,water_well` lists the nearest help
-around the Brandenburg Gate.
+The expectations for German queries, and the US answers that must stay the same with Berlin installed, are in
+`app/tests/fixtures/de_be_queries.json` and `app/tests/test_address_search.py`.
 
-## Changes outside the builder
+`/api/map/near?lat=52.5163&lon=13.3777&cls=hospital,pharmacy,fire_station,police,water_well` lists the nearest help and
+street pumps around the Brandenburg Gate. The pumps have their own layer, "Hand pumps & water wells (untested water)",
+in the Water preset.
 
-- `tools/build_map.py`: `--source`, `--as-of`, `--bounds` and `--extra-poi`, so the same builder serves another region.
-  Without them it writes exactly what it wrote before.
-- `engine/address_search.py` and `server.py` (`places`): German order, `Straße Hausnummer, PLZ Ort`, for indexes whose
-  `meta` says `norm = de-1`. Each index is searched only with its own spelling rule, so the published US indexes
-  and every US query behave as before; `app/tests/test_address_search.py` keeps its US tests unchanged and adds German
-  ones, including US queries with a Berlin index installed. A German-looking query that finds no house falls back to
-  the place search, so `Route 66` or `Pier 39` still find places.
-- `web/map.js` and `server.py` (`HELP`): a `water_well` class and a "Hand pumps & water wells (untested water)" layer
-  in the Water group. Berlin has some 2,000 street hand pumps meant for emergencies; the official list is restricted,
-  and OpenStreetMap has 2,080 of them.
+## Still open
+
+- **Address-index IDs.** `engine/setup/manifest.py` and the upgrade carry-over in `engine/setup/install.py` accept only
+  two-letter IDs, so Setup does not install `DE-BE.sqlite` yet; it opens with `--data`. The shared change is coordinated
+  in #31.
 
 ## Limits
 
@@ -116,12 +132,10 @@ around the Brandenburg Gate.
 
 ### German addresses
 
-- Supported: `Straße 12`, `Straße 12a` or `12 a`, `Str.`/`Strasse`/`Straße`, umlauts typed or spelled out
-  (`Muellerstrasse`), an optional postcode, an optional `Berlin` or locality, and numbers inside street names.
-- Not supported: the number first (`77 Unter den Linden` is read as a US address), ranges (`12-14` finds 14), a
-  street name split in two (`Oranien Str. 25`), and building parts beyond one letter.
 - Eleven houses in Schmöckwitz and Rahnsdorf officially carry a Brandenburg postcode (155xx); they are kept as recorded.
-- The source has no postal place names beyond Berlin, so results read `10117 Berlin-Mitte` (postcode, city, locality).
-- A locality in the query (`Kreuzberg`) is matched after the index returns its first 500 houses with that street and
-  number. One city never comes near that; a national index with very common street names would need the locality
-  filtered inside SQLite instead.
+- The source has no postal place names beyond Berlin, so each row holds `city = Berlin` and its locality in `district`;
+  a German result reads `10117 Berlin-Mitte` (postcode, city, locality).
+- A query may be written `Straße 12`, `Straße 12a` or `12 a`, with `Str.`/`Strasse`/`Straße`,
+  umlauts typed or spelled out (`Muellerstrasse`), an optional postcode and an optional `Berlin` or locality, and with
+  numbers inside street names. Not covered: the number first, ranges (`12-14`), a street name split in two
+  (`Oranien Str. 25`) and building parts beyond one letter.

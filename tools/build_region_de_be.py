@@ -2,15 +2,18 @@
 """Berlin (DE-BE): a self-contained offline map set with places, help points and street addresses.
 
   python3 tools/build_region_de_be.py fetch    # downloads the sources (about 270 MB) into derived/regions/DE-BE/source/
-  python3 tools/build_region_de_be.py build    # writes the data folder derived/regions/DE-BE/data/
+  python3 tools/build_region_de_be.py build    # writes the data folder derived/regions/DE-BE/data/ once it passes check
   python3 tools/build_region_de_be.py check    # validates it; exits non-zero on any failure
   python3 tools/build_region_de_be.py demo     # adds an empty library beside it, then prints the command below
-  python3 server.py --data derived/regions/DE-BE/demo --no-index   # the map, place and address search, offline
+  python3 server.py --data derived/regions/DE-BE/demo --no-index   # the map and the place finder, offline
 
 Everything goes under derived/regions/DE-BE/, so no existing map set is touched. The region keeps its full ID: a bare
 DE means Delaware. Plan and sources: docs/REGIONS-DE.md; what this build holds and what it lacks: docs/MAP-DE-BE.md.
 
-Sources (all redistributable; details, dates and checksums end up in derived/regions/DE-BE/build.json):
+This is the data half only: it runs tools/build_map.py unchanged and imports nothing from engine/ or server.py. Searching
+the address index the German way (scheme de-1 below) is runtime work, offered in #79 and coordinated in #31.
+
+Sources (all redistributable; details, dates and checksums end up in derived/regions/DE-BE/data/build.json):
   - OpenStreetMap via Geofabrik, berlin-YYMMDD-free.gpkg.zip: streets, water, land use, buildings, named places and
     points (ODbL 1.0, "© OpenStreetMap contributors").
   - Geoportal Berlin WFS (gdi.berlin.de), Datenlizenz Deutschland Zero 2.0: street addresses (adressen_rbs), hospitals,
@@ -30,20 +33,18 @@ import struct
 import subprocess
 import sys
 import time
+import unicodedata
 import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
 
 REGION = 'DE-BE'
 BASE = ROOT / 'derived' / 'regions' / REGION
 SOURCE = BASE / 'source'
 DATA = BASE / 'data'
-GEO = DATA / 'derived' / 'geo'
-REPORT = BASE / 'build.json'
 BBOX = (13.0883, 52.3382, 13.7605, 52.6754)     # W, S, E, N of Berlin's land area, from docs/regions-de-proposed.json
 GEOFABRIK = 'https://download.geofabrik.de/europe/germany/berlin-latest-free.gpkg.zip'
 WFS = 'https://gdi.berlin.de/services/wfs/'
@@ -65,6 +66,23 @@ LAYERS = {
 FIELDS = {'addresses': 'strnam,hausnr,hausnrz,postleit,ot_name,geom'}
 # Official records replace OpenStreetMap's points of these classes (one pin per facility, from the public register).
 OFFICIAL = ('hospital', 'pharmacy', 'fire_station', 'police')
+# Berlin's 2,000-odd street pumps (Straßenbrunnen) are mapped as water wells; the official list is not public.
+# tools/build_map.py does not keep that class, so the build adds them from the same extract, the way build_map.py places
+# a point: the middle of the feature's bounding box. build_map.py keeps points of any class from these three tables
+# (from gis_osm_natural_free it keeps springs only).
+WELL_TABLES = ('gis_osm_pois_free', 'gis_osm_pois_a_free', 'gis_osm_natural_a_free')
+
+NORM = 'de-1'
+_UMLAUTS = str.maketrans({'ä': 'ae', 'ö': 'oe', 'ü': 'ue', 'ß': 'ss'})
+
+
+def normalize_de(text):
+    """Scheme 'de-1', stored in the index's norm column: 'Müllerstraße' -> 'muellerstr', 'Straße des 17. Juni' -> 'str des 17 juni'.
+
+    A search over this index has to fold the query with the same rule; the rule is recorded as meta norm = de-1."""
+    text = unicodedata.normalize('NFC', text).lower().translate(_UMLAUTS)
+    words = re.sub(r'[^a-z0-9 ]+', ' ', text).split()
+    return ' '.join(word[:-len('strasse')] + 'str' if word.endswith('strasse') else word for word in words)
 
 
 def log(*args):
@@ -157,7 +175,76 @@ def point(geometry):
     return max((centre(ring) for ring in rings), key=lambda found: found[0])[1]
 
 
-def build_map(fetched):
+def wkb_coords(blob, offset=0):
+    """([(x, y), ...], end offset) of a 2D WKB geometry, read as tools/build_map.py reads it (wkb_parts)."""
+    order = '<' if blob[offset] == 1 else '>'
+    kind = struct.unpack_from(order + 'I', blob, offset + 1)[0] % 1000
+    offset += 5
+    if kind == 1:
+        return [struct.unpack_from(order + 'dd', blob, offset)], offset + 16
+    if kind in (2, 3):
+        rings = 1
+        if kind == 3:
+            rings = struct.unpack_from(order + 'I', blob, offset)[0]
+            offset += 4
+        coords = []
+        for _ in range(rings):
+            count = struct.unpack_from(order + 'I', blob, offset)[0]
+            flat = struct.unpack_from(order + '%dd' % (2 * count), blob, offset + 4)
+            coords += zip(flat[0::2], flat[1::2])
+            offset += 4 + 16 * count
+        return coords, offset
+    if kind in (4, 5, 6, 7):
+        members = struct.unpack_from(order + 'I', blob, offset)[0]
+        offset += 4
+        coords = []
+        for _ in range(members):
+            part, offset = wkb_coords(blob, offset)
+            coords += part
+        return coords, offset
+    raise ValueError('WKB geometry type %d' % kind)
+
+
+def gpkg_middle(blob):
+    """The middle of a GeoPackage geometry's bounding box: where tools/build_map.py puts a point (its poi rows)."""
+    envelope = (blob[3] >> 1) & 7
+    coords, _ = wkb_coords(blob, 8 + {0: 0, 1: 32, 2: 48, 3: 48, 4: 64}[envelope])
+    xs, ys = [x for x, _ in coords], [y for _, y in coords]
+    return (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+
+
+def water_wells(gpkg):
+    """(name, lon, lat) of every OpenStreetMap water well in the extract, from the tables build_map.py reads points from."""
+    src = sqlite3.connect(f'file:{gpkg}?mode=ro', uri=True)
+    wells = []
+    try:
+        for table in WELL_TABLES:
+            for blob, name in src.execute(f"SELECT geom,name FROM {table} WHERE fclass='water_well'"):
+                if blob is None:
+                    continue
+                try:
+                    wells.append((name, *gpkg_middle(blob)))
+                except (ValueError, IndexError, struct.error):     # as in build_map.py: an unreadable geometry is skipped
+                    continue
+    finally:
+        src.close()
+    return wells
+
+
+def official_points():
+    """(cls, name, lon, lat) of the Geoportal records that replace OpenStreetMap's points of the OFFICIAL classes."""
+    for key, cls, name_of in (
+            ('hospitals_plan', 'hospital', lambda p: p.get('kkh_standort') or p.get('kkh')),
+            ('hospitals_other', 'hospital', lambda p: p.get('name')),
+            ('pharmacies', 'pharmacy', lambda p: p.get('aponame')),
+            ('fire_stations', 'fire_station', lambda p: p.get('wach_name')),
+            ('police', 'police', lambda p: f"Polizei {p['langbezeichnung']}" if p.get('langbezeichnung') else None)):
+        for feature in features(key):
+            lon, lat = point(feature['geometry'])
+            yield cls, name_of(feature['properties']), lon, lat
+
+
+def build_map(fetched, geo):
     """OpenStreetMap through the existing map builder into national.sqlite; map.sqlite stays empty, as in a US state map."""
     osm = fetched['files']['osm.gpkg.zip']
     gpkg = BASE / 'work' / 'osm.gpkg'
@@ -166,28 +253,19 @@ def build_map(fetched):
         member = next(n for n in archive.namelist() if n.endswith('.gpkg'))
         with archive.open(member) as src, open(gpkg, 'wb') as dst:
             shutil.copyfileobj(src, dst, 1 << 22)
-    national = GEO / 'national.sqlite'
-    subprocess.run([sys.executable, str(ROOT / 'tools' / 'build_map.py'), str(gpkg), str(national),
-                    '--source', f"OpenStreetMap contributors, via Geofabrik {osm['name']} (ODbL 1.0)",
-                    '--as-of', osm['data_as_of'] or '', '--bounds', ','.join(map(str, BBOX)),
-                    # Berlin's 2,000-odd street pumps (Straßenbrunnen) are mapped as water wells; the official list is not public.
-                    '--extra-poi', 'water_well'],
+    national = geo / 'national.sqlite'
+    subprocess.run([sys.executable, str(ROOT / 'tools' / 'build_map.py'), str(gpkg), str(national)],
                    check=True, stdout=subprocess.DEVNULL)
+    wells = water_wells(gpkg)
     db = sqlite3.connect(national)
     try:
+        # build_map.py writes the Southern California metadata; this map's own source, date and box replace it.
+        db.executemany('INSERT OR REPLACE INTO meta VALUES (?,?)', [
+            ('source', f"OpenStreetMap contributors, via Geofabrik {osm['name']} (ODbL 1.0)"),
+            ('data_as_of', osm['data_as_of'] or ''), ('bounds', ','.join(map(str, BBOX)))])
         replaced = dict(db.execute(f"SELECT cls,count(*) FROM poi WHERE cls IN ({','.join('?' * len(OFFICIAL))}) GROUP BY cls", OFFICIAL))
         db.execute(f"DELETE FROM poi WHERE cls IN ({','.join('?' * len(OFFICIAL))})", OFFICIAL)
-        wells = db.execute("SELECT count(*) FROM poi WHERE cls='water_well'").fetchone()[0]
-        rows = []
-        for key, cls, name_of in (
-                ('hospitals_plan', 'hospital', lambda p: p.get('kkh_standort') or p.get('kkh')),
-                ('hospitals_other', 'hospital', lambda p: p.get('name')),
-                ('pharmacies', 'pharmacy', lambda p: p.get('aponame')),
-                ('fire_stations', 'fire_station', lambda p: p.get('wach_name')),
-                ('police', 'police', lambda p: f"Polizei {p['langbezeichnung']}" if p.get('langbezeichnung') else None)):
-            for feature in features(key):
-                lon, lat = point(feature['geometry'])
-                rows.append((cls, name_of(feature['properties']), lon, lat))
+        rows = [('water_well', name, lon, lat) for name, lon, lat in wells] + list(official_points())
         db.executemany('INSERT INTO poi(cls,name,lon,lat) VALUES (?,?,?,?)', rows)
         db.execute("INSERT OR REPLACE INTO meta VALUES ('help_points', ?)", (
             'hospital, pharmacy, fire_station, police: Geoportal Berlin (dl-de/zero-2.0), replacing OpenStreetMap; '
@@ -197,7 +275,7 @@ def build_map(fetched):
         db.execute('VACUUM')
     finally:
         db.close()
-    empty = sqlite3.connect(GEO / 'map.sqlite')
+    empty = sqlite3.connect(geo / 'map.sqlite')
     try:
         empty.executescript('''CREATE TABLE feat(id INTEGER PRIMARY KEY, layer TEXT, cls TEXT, name TEXT, minz INTEGER, geom BLOB);
           CREATE VIRTUAL TABLE feat_idx USING rtree(id, minx, maxx, miny, maxy, minz, maxz);
@@ -212,7 +290,7 @@ def build_map(fetched):
     finally:
         empty.close()
     gpkg.unlink()
-    return {'osm_points_replaced_by_official': replaced, 'water_wells': wells}
+    return {'osm_points_replaced_by_official': replaced, 'water_wells': len(wells)}
 
 
 
@@ -222,9 +300,8 @@ def house(properties):
     return f'{number}{suffix}' if number else ''
 
 
-def build_addresses(fetched):
-    from engine.address_search import normalize_de     # the index and the search share one spelling rule
-    path = GEO / 'addresses' / f'{REGION}.sqlite'
+def build_addresses(fetched, geo):
+    path = geo / 'addresses' / f'{REGION}.sqlite'
     path.parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(path)
     try:
@@ -246,7 +323,7 @@ def build_addresses(fetched):
         db.execute('CREATE INDEX addr_zip ON addr(zip)')     # '10117 Berlin' is checked against the postcodes
         info = fetched['files']['addresses.geojson']
         db.executemany('INSERT INTO meta VALUES (?,?)', [
-            ('region', REGION), ('norm', 'de-1'), ('count', str(len(rows))),
+            ('region', REGION), ('norm', NORM), ('count', str(len(rows))),
             ('source', 'Geoportal Berlin (dl-de/zero-2.0)'), ('served', info.get('served_at') or ''),
             ('built', time.strftime('%Y-%m-%dT%H:%M:%S'))])
         db.commit()
@@ -255,9 +332,10 @@ def build_addresses(fetched):
     return {'addresses': len(rows), 'address_records_without_house_number': skipped}
 
 
-def build_places(fetched):
-    """The place finder: districts, localities, postcode areas, street names, and named OpenStreetMap places and points."""
-    path = GEO / 'places.sqlite'
+def build_places(fetched, geo):
+    """The place finder: districts, localities, postcode areas, street names, the named official help points, and named
+    OpenStreetMap places and points. Each row names the source it came from."""
+    path = geo / 'places.sqlite'
     path.unlink(missing_ok=True)
     db = sqlite3.connect(path)
     counts = {}
@@ -296,9 +374,15 @@ def build_places(fetched):
             lon, lat = points[len(points) // 2]
             rows.append((street, 'street', f'{where}, Berlin' if where else 'Berlin', lat, lon, 3, 'Geoportal Berlin'))
         add('street', rows)
-        national = sqlite3.connect(f"file:{GEO / 'national.sqlite'}?mode=ro", uri=True)
+        # national.sqlite holds the official help points in place of OpenStreetMap's (build_map), so they are taken from
+        # their own records here, labelled Geoportal Berlin; the points of every other class there are OpenStreetMap's.
+        add('official_point', [(name, cls.replace('_', ' '), 'Berlin (Geoportal)', lat, lon, 4, 'Geoportal Berlin')
+                               for cls, name, lon, lat in official_points() if name])
+        national = sqlite3.connect(f"file:{geo / 'national.sqlite'}?mode=ro", uri=True)
         add('osm_point', [(name, cls.replace('_', ' '), 'Berlin (OpenStreetMap)', lat, lon, 4, 'OpenStreetMap')
-                          for cls, name, lon, lat in national.execute("SELECT cls,name,lon,lat FROM poi WHERE name IS NOT NULL AND name<>''")])
+                          for cls, name, lon, lat in national.execute(
+                              f"SELECT cls,name,lon,lat FROM poi WHERE name IS NOT NULL AND name<>'' AND cls NOT IN ({','.join('?' * len(OFFICIAL))})",
+                              OFFICIAL)])
         rows = []
         for cls, name, geom in national.execute("SELECT cls,name,geom FROM feat WHERE layer='place' AND name IS NOT NULL"):
             _, _, x, y = struct.unpack_from('<iiii', geom)
@@ -314,63 +398,87 @@ def build_places(fetched):
 
 
 def build():
+    """Builds into data.new/ beside the previous output and puts it in place of data/ only once it passes check, so a
+    rebuild that fails or stops leaves the last good data/ (with its build.json) as it was."""
     fetched = json.loads((SOURCE / 'fetched.json').read_text(encoding='utf-8'))
-    if DATA.exists():
-        shutil.rmtree(DATA)
-    GEO.mkdir(parents=True)
+    data, staging, previous = BASE / 'data', BASE / 'data.new', BASE / 'data.old'
+    if previous.exists() and not data.exists():
+        previous.rename(data)         # an earlier build stopped between the two renames at the end
+    for leftover in (staging, previous):
+        if leftover.exists():
+            shutil.rmtree(leftover)
+    geo = staging / 'derived' / 'geo'
+    geo.mkdir(parents=True)
     started = time.time()
     counts = {}
     log('map (OpenStreetMap)')
-    counts.update(build_map(fetched))
+    counts.update(build_map(fetched, geo))
     log('addresses')
-    counts.update(build_addresses(fetched))
+    counts.update(build_addresses(fetched, geo))
     log('places')
-    counts.update(build_places(fetched))
-    map_files = {f.relative_to(DATA).as_posix(): f.stat().st_size for f in sorted(GEO.glob('*.sqlite'))}
-    (DATA / 'map-set.json').write_text(json.dumps({'name': REGION, 'files': map_files, 'bytes': sum(map_files.values()),
+    counts.update(build_places(fetched, geo))
+    map_files = {f.relative_to(staging).as_posix(): f.stat().st_size for f in sorted(geo.glob('*.sqlite'))}
+    (staging / 'map-set.json').write_text(json.dumps({'name': REGION, 'files': map_files, 'bytes': sum(map_files.values()),
                                                    'seconds': round(time.time() - started)}, indent=1), encoding='utf-8')
     outputs = {}
-    for f in sorted(DATA.rglob('*')):
+    for f in sorted(staging.rglob('*')):
         if f.is_file():
-            outputs[f.relative_to(DATA).as_posix()] = {'bytes': f.stat().st_size, 'sha256': sha256(f)}
+            outputs[f.relative_to(staging).as_posix()] = {'bytes': f.stat().st_size, 'sha256': sha256(f)}
     report = {'region': REGION, 'built': time.strftime('%Y-%m-%dT%H:%M:%S'), 'bbox': BBOX, 'sources': fetched,
               'counts': counts, 'outputs': outputs,
               'note': 'map-set.json lists the map files; the address index is a separate sidecar, as for US states.'}
-    REPORT.write_text(json.dumps(report, indent=1, ensure_ascii=False), encoding='utf-8')
+    (staging / 'build.json').write_text(json.dumps(report, indent=1, ensure_ascii=False), encoding='utf-8')
     log('built in', round(time.time() - started), 's;', json.dumps(counts, ensure_ascii=False))
+    failures = check(staging)
+    if failures:
+        raise SystemExit(f'{len(failures)} check(s) failed: {data} is unchanged; the failed build is in {staging}')
+    if data.exists():
+        data.rename(previous)
+    try:
+        staging.rename(data)
+    except OSError:
+        if previous.exists():
+            previous.rename(data)
+        raise
+    if previous.exists():
+        shutil.rmtree(previous)
+    (BASE / 'build.json').unlink(missing_ok=True)     # where earlier versions of this builder wrote the report
+    log('in place:', data)
 
 
 # ------------------------------------------------------------------ check ----
 
-SAMPLE_ADDRESSES = [   # (query, expected street, expected house number); public buildings, checked against the source
-    ('Unter den Linden 77, 10117 Berlin', 'Unter den Linden', '77'),
-    ('Platz der Republik 1', 'Platz der Republik', '1'),
-    ('Straße des 17. Juni 135', 'Straße des 17. Juni', '135'),
+SAMPLE_ADDRESSES = [   # (street, house number, postcode, locality); public buildings, checked against the source
+    ('Unter den Linden', '77', '10117', 'Mitte'),                  # Hotel Adlon
+    ('Platz der Republik', '1', '10557', 'Tiergarten'),            # Reichstag building
+    ('Straße des 17. Juni', '135', '10623', 'Charlottenburg'),     # TU Berlin; the 17 belongs to the street name
 ]
 
 
-def check():
-    sys.path.insert(0, str(ROOT))
-    from engine.address_search import find_addresses
+def check(data=DATA):
+    """The data only: nothing here imports engine/ or server.py, so this says nothing about how the app searches it.
+
+    Returns what failed; build runs it on the new folder before putting it in place."""
     failures = []
+    geo = data / 'derived' / 'geo'
 
     def expect(ok, what):
         print(('ok    ' if ok else 'FAIL  ') + what)
         if not ok:
             failures.append(what)
-    report = json.loads(REPORT.read_text(encoding='utf-8'))
+    report = json.loads((data / 'build.json').read_text(encoding='utf-8'))
     for rel, info in report['outputs'].items():
-        f = DATA / rel
+        f = data / rel
         expect(f.is_file() and f.stat().st_size == info['bytes'] and sha256(f) == info['sha256'], f'{rel}: size and SHA-256 as built')
-    map_set = json.loads((DATA / 'map-set.json').read_text(encoding='utf-8'))
+    map_set = json.loads((data / 'map-set.json').read_text(encoding='utf-8'))
     expect(map_set['name'] == REGION, f"map-set.json name is {REGION}")
-    expect(all((DATA / rel).stat().st_size == size for rel, size in map_set['files'].items()), 'map-set.json sizes match the files')
+    expect(all((data / rel).stat().st_size == size for rel, size in map_set['files'].items()), 'map-set.json sizes match the files')
     for rel in [*map_set['files'], f'derived/geo/addresses/{REGION}.sqlite']:
-        db = sqlite3.connect(f'file:{DATA / rel}?mode=ro', uri=True)
+        db = sqlite3.connect(f'file:{data / rel}?mode=ro', uri=True)
         expect(db.execute('PRAGMA integrity_check').fetchone()[0] == 'ok', f'{rel}: SQLite integrity')
         db.close()
     west, south, east, north = BBOX
-    nat = sqlite3.connect(f"file:{GEO / 'national.sqlite'}?mode=ro", uri=True)
+    nat = sqlite3.connect(f"file:{geo / 'national.sqlite'}?mode=ro", uri=True)
     roads = nat.execute("SELECT count(*) FROM feat WHERE layer='road'").fetchone()[0]
     expect(roads > 50000, f'streets drawn from OpenStreetMap: {roads:,} road features')
     for cls, low in (('hospital', 100), ('pharmacy', 600), ('fire_station', 90), ('police', 30), ('water_well', 1500)):
@@ -380,7 +488,7 @@ def check():
                           (west - .15, east + .15, south - .15, north + .15)).fetchone()[0]
     expect(outside == 0, f'every help point within Berlin plus the 0.15° margin ({outside} outside)')
     nat.close()
-    addr = sqlite3.connect(f"file:{GEO / 'addresses' / (REGION + '.sqlite')}?mode=ro", uri=True)
+    addr = sqlite3.connect(f"file:{geo / 'addresses' / (REGION + '.sqlite')}?mode=ro", uri=True)
     n, bad_zip, outside, border = addr.execute(
         "SELECT count(*), sum(zip NOT GLOB '[0-9][0-9][0-9][0-9][0-9]'), sum(lon NOT BETWEEN ? AND ? OR lat NOT BETWEEN ? AND ?),"
         " sum(zip NOT GLOB '1[0-4][0-9][0-9][0-9]') FROM addr", (west, east, south, north)).fetchone()
@@ -389,21 +497,29 @@ def check():
     # A few houses on the city edge (Schmöckwitz, Rahnsdorf) officially carry a Brandenburg postcode: report, not fail.
     expect(border < 100, f'{border} addresses with a postcode outside 10xxx-14xxx (Berlin houses on the Brandenburg border)')
     expect(not outside, f'every address inside the Berlin box ({outside} outside)')
+    meta = dict(addr.execute('SELECT key,value FROM meta'))
+    expect(meta.get('region') == REGION and meta.get('norm') == NORM, f"index meta: region {meta.get('region')}, norm {meta.get('norm')}")
+    expect(meta.get('count') == str(n), f"index meta count {meta.get('count')} matches its {n:,} rows")
+    wrong = [street for street, norm in addr.execute('SELECT DISTINCT street,norm FROM addr') if normalize_de(street) != norm]
+    expect(not wrong, f'every stored street key follows scheme {NORM} ({len(wrong)} do not{": " + ", ".join(wrong[:3]) if wrong else ""})')
+    for street, number, postcode, locality in SAMPLE_ADDRESSES:
+        found = addr.execute('SELECT zip,district FROM addr WHERE norm=? AND num=?', (normalize_de(street), number)).fetchall()
+        expect(found == [(postcode, locality)], f'index has {street} {number}, {postcode} {locality} exactly once ({found})')
     addr.close()
-    for query, street, number in SAMPLE_ADDRESSES:
-        found = find_addresses(query, GEO)
-        expect(bool(found) and found[0]['name'] == f'{street} {number}', f'address search "{query}" -> {found[0]["name"] if found else "nothing"}')
-    expect(find_addresses('Unter den Linden 99999', GEO) == [], 'an unknown house number returns nothing, never a guess')
-    places = sqlite3.connect(f"file:{GEO / 'places.sqlite'}?mode=ro", uri=True)
+    places = sqlite3.connect(f"file:{geo / 'places.sqlite'}?mode=ro", uri=True)
     for name, kind in (('Kreuzberg', 'locality (Ortsteil)'), ('Friedrichshain-Kreuzberg', 'district (Bezirk)'), ('10117', 'postcode area'),
                        ('Oranienstraße', 'street')):
         hit = places.execute('SELECT count(*) FROM place_fts f JOIN place p ON p.id=f.rowid WHERE place_fts MATCH ? AND p.name=? AND p.kind=?',
                              (f'"{name}"', name, kind)).fetchone()[0]
         expect(hit > 0, f'place finder has {kind} "{name}"')
+    kinds = [cls.replace('_', ' ') for cls in OFFICIAL]
+    official, other = places.execute(f"SELECT count(*), count(*) - count(CASE WHEN source='Geoportal Berlin' THEN 1 END) FROM place "
+                                     f"WHERE kind IN ({','.join('?' * len(kinds))})", kinds).fetchone()
+    expect(official >= 800 and not other, f'place finder labels its {official:,} official help points Geoportal Berlin ({other} labelled otherwise)')
     places.close()
-    if failures:
-        raise SystemExit(f'{len(failures)} check(s) failed')
-    print('all checks passed')
+    if not failures:
+        print('all checks passed (data only; German address search in the app is not checked here, see #79)')
+    return failures
 
 
 def demo():
@@ -426,7 +542,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     parser.add_argument('step', choices=('fetch', 'build', 'check', 'demo'))
     step = parser.parse_args().step
-    {'fetch': fetch, 'build': build, 'check': check, 'demo': demo}[step]()
+    if step == 'check':
+        failures = check()
+        if failures:
+            raise SystemExit(f'{len(failures)} check(s) failed')
+    else:
+        {'fetch': fetch, 'build': build, 'demo': demo}[step]()
 
 
 if __name__ == '__main__':
