@@ -70,12 +70,12 @@ with Spain (-6.21°), Melgaço and Castro Laboreiro in the north (42.15°), and 
 | Code | NUTS | Name | Box (west, south, east, north) | Box with 0.15° margin | Box source |
 |---|---|---|---|---|---|
 | `pt-11` | PT11 | Norte | -8.8811, 40.7588, -6.1892, 42.1543 | -9.04, 40.60, -6.03, 42.31 | CAOP 2025 polygon |
-| `pt-19` | PT19 | Centro | -9.0403, 39.4657, -6.7810, 41.0380 | -9.20, 39.31, -6.63, 41.19 | CAOP 2025 polygon |
-| `pt-1a` | PT1A | Área Metropolitana de Lisboa (Grande Lisboa) | -9.5005, 38.6744, -8.8415, 39.0660 | -9.66, 38.52, -8.69, 39.22 | CAOP 2025 polygon |
-| `pt-1b` | PT1B | Área Metropolitana de Lisboa (Península de Setúbal) | -9.2630, 38.4101, -8.4910, 38.8457 | -9.42, 38.26, -8.34, 39.00 | CAOP 2025 polygon |
-| `pt-1c` | PT1C | Alentejo | -8.9129, 37.3189, -6.9315, 39.6639 | -9.07, 37.16, -6.78, 39.82 | CAOP 2025 polygon |
-| `pt-1d` | PT1D | Oeste e Vale do Tejo | -9.5170, 38.7320, -7.8090, 39.8388 | -9.67, 38.58, -7.65, 39.99 | CAOP 2025 polygon |
-| `pt-15` | PT15 | Algarve | -8.9975, 36.9618, -7.3933, 37.5294 | -9.15, 36.81, -7.24, 37.68 | CAOP 2025 polygon |
+| `pt-19` | PT19 | Centro | -9.0403, 39.4653, -6.7810, 41.0375 | -9.20, 39.31, -6.63, 41.19 | CAOP 2025 polygon |
+| `pt-1a` | PT1A | Área Metropolitana de Lisboa (Grande Lisboa) | -9.5005, 38.6731, -8.8415, 39.0647 | -9.66, 38.52, -8.69, 39.22 | CAOP 2025 polygon |
+| `pt-1b` | PT1B | Área Metropolitana de Lisboa (Península de Setúbal) | -9.2630, 38.4091, -8.4910, 38.8454 | -9.42, 38.25, -8.34, 39.00 | CAOP 2025 polygon |
+| `pt-1c` | PT1C | Alentejo | -8.9129, 37.3189, -6.9315, 39.6637 | -9.07, 37.16, -6.78, 39.82 | CAOP 2025 polygon |
+| `pt-1d` | PT1D | Oeste e Vale do Tejo | -9.5170, 38.7315, -7.8090, 39.8387 | -9.67, 38.58, -7.65, 39.99 | CAOP 2025 polygon |
+| `pt-15` | PT15 | Algarve | -8.9975, 36.9617, -7.3933, 37.5291 | -9.15, 36.81, -7.24, 37.68 | CAOP 2025 polygon |
 | `pt-20w` | PT20 (west) | Açores: Corvo e Flores | -31.2660, 39.3749, -31.1104, 39.6766 | -31.42, 39.22, -30.96, 39.83 | INE address points (group `AC25`) |
 | `pt-20e` | PT20 (east) | Açores: restantes ilhas | -28.8250, 36.9295, -25.0138, 39.0954 | -28.98, 36.77, -24.86, 39.25 | INE address points (group `AC26`) |
 | `pt-30` | PT30 | Região Autónoma da Madeira | -17.2659, 30.0288, -15.8537, 33.1282 | -17.42, 29.87, -15.70, 33.28 | CAOP 2025 polygon |
@@ -204,10 +204,10 @@ WHERE country = 'PT';
   CAOP polygon bounds and the address groups' own exact extremes, not the four-decimal figures printed in the table
   (counting against those printed figures drops three rows in each island group, whose true extremes carry more
   decimals; an earlier revision of this proposal made exactly that mistake, and the counts below supersede it). The
-  totals double-count at borders: **1,840,446 of 5,911,139 rows fall inside two or more boxes**, because neighbouring
+  totals double-count at borders: **1,842,324 of 5,911,139 rows fall inside two or more boxes**, because neighbouring
   regions' bounding boxes overlap over large areas (the Norte and Centro boxes alone share a 2°-by-0.3° band).
-  Per-box counts, for scale only, with double counting: Norte 1,957,619; Centro 1,413,893; Oeste e Vale do Tejo
-  1,419,073; Grande Lisboa 1,161,895; Península de Setúbal 1,067,726; Alentejo 692,741; Algarve 393,255; Madeira
+  Per-box counts, for scale only, with double counting: Norte 1,957,747; Centro 1,414,055; Oeste e Vale do Tejo
+  1,422,122; Grande Lisboa 1,163,567; Península de Setúbal 1,067,495; Alentejo 692,635; Algarve 393,246; Madeira
   130,271; Azores east 108,523; Corvo and Flores 2,374. The three island counts equal their source groups exactly,
   and the seven CAOP continental boxes contain every mainland row — the first revision's GISCO boxes left 1,540
   mainland rows outside them, all labelled geocoding outliers. The 36.93° N row above is not one of those — it

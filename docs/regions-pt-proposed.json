@@ -61,7 +61,7 @@
   ],
   "not_open_nationwide": [
     "Postcode areas: the CTT dictionary is a commercial product and its terms were not verified (page did not answer from our route on 2026-11-20); expected to mirror the Correos/CNIG case in REGIONS-ES.md. The postcode attached to each address in the INE CC BY 4.0 data is a different thing and is what address search needs.",
-    "Per-region address cuts: Portugal's postcodes carry no province codes, and the region bounding boxes overlap heavily (1,840,446 of 5,911,139 rows fall in two or more boxes). A per-region index needs a municipality-to-region table from the INE municipality register, or per-municipality cuts keyed on the address rows' own city field.",
+    "Per-region address cuts: Portugal's postcodes carry no province codes, and the region bounding boxes overlap heavily (1,842,324 of 5,911,139 rows fall in two or more boxes). A per-region index needs a municipality-to-region table from the INE municipality register, or per-municipality cuts keyed on the address rows' own city field.",
     "Dams and hydrography inventories: APA/SNIAmb did not respond on 2026-11-20; OSM waterway=dam (805 ways, 35 nodes) and 1,922 weirs are the practical source meanwhile."
   ],
   "addressing": {
@@ -79,9 +79,9 @@
       "nuts": "PT11",
       "bbox": {
         "west": -8.881059,
-        "south": 40.758847,
+        "south": 40.758764,
         "east": -6.189159,
-        "north": 42.154313,
+        "north": 42.154312,
         "margin_west": -9.04,
         "margin_south": 40.6,
         "margin_east": -6.03,
@@ -98,9 +98,9 @@
       "nuts": "PT19",
       "bbox": {
         "west": -9.040261,
-        "south": 39.465688,
+        "south": 39.465251,
         "east": -6.78096,
-        "north": 41.037963,
+        "north": 41.037485,
         "margin_west": -9.2,
         "margin_south": 39.31,
         "margin_east": -6.63,
@@ -117,9 +117,9 @@
       "nuts": "PT1A",
       "bbox": {
         "west": -9.500527,
-        "south": 38.674355,
+        "south": 38.673146,
         "east": -8.84154,
-        "north": 39.065992,
+        "north": 39.064719,
         "margin_west": -9.66,
         "margin_south": 38.52,
         "margin_east": -8.69,
@@ -136,11 +136,11 @@
       "nuts": "PT1B",
       "bbox": {
         "west": -9.262976,
-        "south": 38.410076,
+        "south": 38.409074,
         "east": -8.490972,
-        "north": 38.845699,
+        "north": 38.845424,
         "margin_west": -9.42,
-        "margin_south": 38.26,
+        "margin_south": 38.25,
         "margin_east": -8.34,
         "margin_north": 39.0
       },
@@ -155,9 +155,9 @@
       "nuts": "PT1C",
       "bbox": {
         "west": -8.912868,
-        "south": 37.318941,
+        "south": 37.318936,
         "east": -6.931499,
-        "north": 39.663937,
+        "north": 39.66368,
         "margin_west": -9.07,
         "margin_south": 37.16,
         "margin_east": -6.78,
@@ -174,9 +174,9 @@
       "nuts": "PT1D",
       "bbox": {
         "west": -9.51703,
-        "south": 38.73199,
+        "south": 38.73149,
         "east": -7.808988,
-        "north": 39.838815,
+        "north": 39.83873,
         "margin_west": -9.67,
         "margin_south": 38.58,
         "margin_east": -7.65,
@@ -193,9 +193,9 @@
       "nuts": "PT15",
       "bbox": {
         "west": -8.997546,
-        "south": 36.961774,
+        "south": 36.96171,
         "east": -7.393304,
-        "north": 37.529438,
+        "north": 37.529131,
         "margin_west": -9.15,
         "margin_south": 36.81,
         "margin_east": -7.24,
