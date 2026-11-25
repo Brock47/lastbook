@@ -12,8 +12,8 @@ Several sessions build this at once. This file is the interface between them. Ch
 - **The one way out.** Setup's downloader is the only code in Lastbook that may reach the internet, and only when the person
   starts or resumes a download. It fetches over HTTPS only from hosts in `ALLOWED_HOSTS` (below), with no proxy taken from
   the system, and follows a redirect only to another allowed host. Everything else stays as it is: the windows block all web
-  loads, the assistant talks to loopback or pipes only, and nothing is sent anywhere (no telemetry, no update check at
-  startup). The owner authorized this route on 2026-11-12 for the first-run install. It replaces "downloads happen outside
+  loads, the assistant talks to loopback or pipes only, and nothing is sent anywhere (no telemetry; no update check at
+  startup unless the person turned on "Notify me about app updates", see `updates` below). The owner authorized this route on 2026-11-12 for the first-run install. It replaces "downloads happen outside
   the app" for library packs and the model, and nothing more.
 - **No blanket memory floor.** The local AI is offered when the measured fit says it fits (`llm_local.judge`, about 18 GB
   of memory for model and context, plus a 2.5 GiB reserve). It is not offered below that, and the screen says why in plain words.
@@ -87,6 +87,10 @@ fails as `checksum`, and a 200 to a Range goes on over one connection from the h
   `settings.json` remembers it as before (`app/main.py`).
 - Work in progress: `<parent>/LastbookData.setup/`, holding `downloads/` (partial files with a `.part` suffix and a
   `.json` beside each: url, size, sha256, bytes done, ETag, and `"parallel": true` while pieces may lie past bytes done; a resume then keeps only the hashed run, so at most `AHEAD` pieces are fetched again) and `unpack/` (the new LastbookData being built).
+  A switch that fails leaves `kept-<time>/LastbookData/` there: the person's files (`models/`, `derived/geo/addresses/`)
+  carried into the staged library before it failed, and named in the error. Setup never deletes it: not a later job, its
+  cancel, nor a later successful setup. The person can delete it once the library in use has its AI and address search
+  again (or they no longer want them); the work folder itself goes once no `kept-*` is left.
 - The model goes to `LastbookData/models/<file>`. After its SHA-256 matches, setup calls `llm_local.mark_checked(path)`, so
   the AI does not read 17 GB a second time.
 - Space needed = download size + unpacked size + 2 GB, on the disk that holds the target. A zip is deleted once it is
@@ -128,6 +132,8 @@ are served by `engine/setup/api.py` alone. In normal mode `server.py` hands `/ap
 | `POST /api/setup/server-models` `{address}` | the models of a model server on this computer (#78): `{base, address, models}` from its `/v1/models`, or `{error, code}`: `not_here` (not a loopback address; nothing is asked), `no_answer`, `needs_key` (401 or 403: no key is sent yet), `no_list`, `no_models`. The one request made before a choice, and only when the person presses *List models* |
 | `POST /api/setup/use-server` `{address, model}` | lists the models again and saves the choice in `setup.json` (`model_server: {base, model}`): `{model_server: {address, model}}`, or `not_listed`. While a server is chosen, Chat uses it instead of the local AI (text only, no `view_page`); the local AI file stays. In manage mode the open library switches at once; a choice made in first-run setup counts when the library opens. `SURVIVAL_MODEL_BASE` set at start wins over the saved choice until the person chooses again |
 | `POST /api/setup/stop-server` | forgets the choice: `{model_server: null}`; Chat goes back to the local AI |
+| `GET /api/setup/updates` | "Notify me about app updates" (engine/update.py `Notices`): `{supported, notify, available, checking}`. `supported: false` outside the desktop app |
+| `POST /api/setup/updates` `{notify: true\|false}` | sets it, from the person's own checkbox only (Setup's choose screen, Settings). Off clears any saved notice at once. Starts no check. Error `code`: `save`, `unsupported`, `bad_request` |
 | `POST /api/setup/start` `{repair: true, ai}` | manage mode: re-checks every file against the library's `pack-manifest.tsv` and the model's SHA-256 (items `verifying`); fetches again only what is wrong (the pack: downloaded and switched to like an upgrade; the model: replaced in place). All well: `done`, nothing downloaded |
 
 Added by setup-backend on 2026-11-12: `pick` (answers `{path, free_bytes, disk}` or `{path: null, cancelled: true}`), `delete-old`, `remove-ai` and repair above; `hardware.disks[].name` (Macintosh HD, "Data (D:)"); `current.old` (old libraries kept after an upgrade);
@@ -197,6 +203,25 @@ opens with the new one. `state.current.map` reports the installed set (`base`, `
 `map-set.json`). The manage screen lets a person add or change the state later. A pack that already contains a
 detailed map (Medium has California; All has the whole US) shows that, and choosing a state on Medium replaces
 its California map. All needs no state map. The state is chosen by the person; Lastbook does not detect location.
+
+Country maps work exactly the same way, for a European country instead of a US state: the entry's `kind` is
+`"country"`, its `id` is `eu-<iso>` (`eu-at` for Austria — never a bare two-letter code, so a country can never take
+a state's id, as Germany would take Delaware's), and the zip is `Lastbook-Map-eu-at.zip` with the same contents and
+the same rules. `packaging/build_packs.py map eu-at` builds it with the state cutting rules
+(`derived/packs/pack-spec.json` → `map_sets.country`); only the box differs: a state's box comes from its ZIP
+centres, a country's is the bounding box of Geofabrik's OpenStreetMap extract polygon for that country
+(`packaging/europe-countries.json`), with the same 0.15 degree margin. What a country set holds is bounded by the
+source layers' own coverage, exactly as a state's is. Setup needs no change: a map is chosen by its manifest `id`
+either way. Address indexes stay US-only — their source (Overture addresses) is split by US state, so there is no
+country entry to publish until that source is keyed by country.
+
+Publishing a country set is opt-in. `packaging/state_maps.py --order` and `--worker` only include countries listed in
+`packaging/country-publication.json`; that file is empty because the detailed source layers are still US-only. Before
+zipping or uploading a listed country, the publisher checks the built set and fails if it holds no detailed roads,
+help or water points, terrain, buildings, crops or OpenStreetMap place names inside the country box. A base-only build
+therefore never reaches the manifest as an available country map. A country is added to that file only after a source
+snapshot for it passes the check and setup can show the set's attribution. This PR says nothing about the completeness
+of any country's map: with today's sources, a country build is the low-zoom base only.
 
 Built by setup-backend (2026-11-12):
 - Job item `kind: "map"` comes after the pack and before the model: `waiting`, `downloading`, `unpacking` (bytes of
