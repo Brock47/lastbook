@@ -158,6 +158,8 @@
   font-size: .975rem;
 }
 
+.foot .updates-signup-footer { margin: 0 0 32px; text-align: left; }
+
 .updates-signup {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1.12fr);

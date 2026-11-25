@@ -1,6 +1,4 @@
-const form = document.querySelector('.updates-form');
-
-if (form) {
+for (const form of document.querySelectorAll('.updates-form')) {
   const email = form.querySelector('input[name="email"]');
   const button = form.querySelector('button');
   const status = form.querySelector('[role="status"]');
