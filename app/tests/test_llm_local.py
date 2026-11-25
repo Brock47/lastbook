@@ -173,5 +173,132 @@ class SlowLoad(Base):
         self.assertAlmostEqual(self.clock.now - t0, llm_local.START_WAIT, delta=1)
 
 
+class LoadMode(unittest.TestCase):
+    def test_judge_keeps_a_reported_load_mode(self):
+        self.assertEqual(llm_local.judge(dict(FIT, load_mode='mmap'))['load_mode'], 'mmap')
+        self.assertNotIn('load_mode', llm_local.judge(dict(FIT)))
+
+    def test_a_processor_fallback_does_not_change_the_measurement(self):
+        local = llm_local.Local()
+        local.runner, local.path, local.cpu_fallback = 'lastbook-llm', 'model.gguf', True
+        self.assertNotIn('--cpu-only', local._argv(['--measure'], cpu=False))
+        self.assertIn('--cpu-only', local._argv())
+        self.assertFalse(local._graphics_load_failed(4))          # already on the processor
+        local.cpu_fallback = False
+        local.fit = {'n_gpu_layers': 0}
+        self.assertFalse(local._graphics_load_failed(4))          # nothing was placed on a graphics chip
+        local.fit = {'n_gpu_layers': 31}
+        self.assertTrue(local._graphics_load_failed(4))
+        self.assertTrue(local._graphics_load_failed(5))
+        self.assertFalse(local._graphics_load_failed(1))
+
+
+class GraphicsFallback(Base):
+    """A graphics load that exits 4 or 5 is started once on the processor, in the same wait.
+    A load that becomes ready, or that never asked for a graphics chip, is not."""
+
+    def setUp(self):
+        super().setUp()
+        del self.local._spawn
+        self.local.state, self.local.path = 'stopped', self.model
+        self.local.fit = {'fits': True, 'n_gpu_layers': 31}
+        self.launched, self.scripts, self.procs = [], [], []
+        self.addCleanup(self._close_procs)
+
+    def _close_procs(self):
+        for _proc, q in self.procs:
+            q.put(None)
+
+    def _proc(self, lines, code, close):
+        q = queue.Queue()
+        for line in lines:
+            q.put(line)
+        if close:
+            q.put(None)
+        proc = mock.Mock()
+        proc.stdin = mock.Mock()
+
+        def iterate():
+            while True:
+                item = q.get()
+                if item is None:
+                    return
+                yield item
+
+        proc.stdout = iterate()
+        proc.wait.return_value = code
+        proc.poll.return_value = None
+        self.procs.append((proc, q))
+        return proc
+
+    def _popen(self, argv, **_kw):
+        self.launched.append(list(argv))
+        if not self.scripts:
+            raise AssertionError('the model was started again: ' + ' '.join(map(str, argv)))
+        return self._proc(*self.scripts.pop(0))
+
+    def start(self, scripts):
+        self.scripts = list(scripts)
+        real_sleep = time.sleep
+        with mock.patch.object(llm_local.paths, 'DATA', self.dir), \
+                mock.patch.object(llm_local.subprocess, 'Popen', self._popen), \
+                mock.patch.object(llm_local, 'START_WAIT', 5), \
+                mock.patch.object(llm_local.time, 'sleep', lambda _s: real_sleep(0.005)):
+            return self.local.ensure_running()
+
+    def test_a_lost_device_is_ready_on_the_processor(self):
+        lost = json.dumps({'ev': 'error', 'code': 'load', 'msg': 'the model could not be loaded'}).encode()
+        ready = json.dumps({'ev': 'ready', 'n_ctx': 16384}).encode()
+        self.assertIsNone(self.start([([lost], 4, True), ([ready], 0, False)]))
+        self.assertEqual(self.local.state, 'ready')
+        self.assertTrue(self.local.cpu_fallback)
+        self.assertEqual(self.local.status()['cpu_fallback'], True)
+        self.assertEqual(len(self.launched), 2)
+        self.assertNotIn('--cpu-only', self.launched[0])
+        self.assertIn('--cpu-only', self.launched[1])
+        self.assertEqual(self.launched[0].count('--ctx'), 1)
+
+    def test_a_graphics_load_that_gets_ready_is_not_restarted(self):
+        ready = json.dumps({'ev': 'ready', 'n_ctx': 16384}).encode()
+        self.assertIsNone(self.start([([ready], 0, False)]))
+        self.assertEqual(len(self.launched), 1)
+        self.assertNotIn('--cpu-only', self.launched[0])
+        self.assertFalse(self.local.cpu_fallback)
+
+    def test_the_processor_is_not_tried_twice(self):
+        lost = json.dumps({'ev': 'error', 'code': 'load', 'msg': 'the model could not be loaded'}).encode()
+        oom = json.dumps({'ev': 'error', 'code': 'context', 'msg': 'not enough memory'}).encode()
+        why = self.start([([lost], 4, True), ([oom], 5, True)])
+        self.assertEqual(self.local.state, 'error')
+        self.assertIn('not enough free memory', why)
+        self.assertEqual(len(self.launched), 2)
+        self.assertIn('--cpu-only', self.launched[1])
+        self.assertFalse(self.local.available())
+
+    def test_a_fit_with_no_graphics_layers_is_not_switched(self):
+        self.local.fit = {'fits': True, 'n_gpu_layers': 0}
+        lost = json.dumps({'ev': 'error', 'code': 'load', 'msg': 'the model could not be loaded'}).encode()
+        why = self.start([([lost], 4, True)])
+        self.assertEqual(len(self.launched), 1)
+        self.assertNotIn('--cpu-only', self.launched[0])
+        self.assertFalse(self.local.cpu_fallback)
+        self.assertEqual(self.local.state, 'error')
+        self.assertIn('could not load the model file', why)
+
+    def test_an_unexpected_exit_is_not_a_processor_fallback(self):
+        why = self.start([([], 1, True)])
+        self.assertEqual(len(self.launched), 1)
+        self.assertFalse(self.local.cpu_fallback)
+        self.assertEqual(self.local.state, 'stopped')
+        self.assertIn('interrupted', why)
+
+    def test_a_quit_is_not_a_processor_fallback(self):
+        quit_ev = json.dumps({'ev': 'error', 'code': 'quit', 'msg': 'stopping'}).encode()
+        self.start([([quit_ev], 4, True)])
+        self.assertEqual(len(self.launched), 1)
+        self.assertFalse(self.local.cpu_fallback)
+        self.assertNotEqual(self.local.state, 'ready')
+
+
 if __name__ == '__main__':
     unittest.main()
