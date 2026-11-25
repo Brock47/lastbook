@@ -109,7 +109,7 @@ With only this map set installed:
 | Search | Result |
 |---|---|
 | `Unter den Linden 77`, `Unter den Linden 77, 10117 Berlin`, `Straße des 17. Juni 135` | the house, named the German way (`Unter den Linden 77`, `10117 Berlin-Mitte`) and credited to Geoportal Berlin |
-| `Müllerstraße 12`, `Muellerstr. 12` | both houses of that number: Müllerstraße runs through Wedding and Mahlsdorf |
+| `Müllerstraße 12`, `Muellerstr. 12` | the three houses of that number, in Wedding, Mahlsdorf and Lichterfelde: Berlin has more than one Müllerstraße |
 | `Unter den Linden 9999` | the street, never a nearby house |
 | `Kreuzberg`, `10117`, `10117 Berlin`, `Oranienstraße`, `Alexanderplatz` | the locality, the postcode area, the street |
 | `Route 66` | `Straße 66` in Karow, a real numbered Berlin street: with no such house the place search answers |
