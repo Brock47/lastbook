@@ -221,21 +221,61 @@ def find_addresses(query, geo_directory, limit=8, near=None):
     """Return exact house-number matches from installed indexes, never a guessed house.
 
     A number-first query searches the US-normalized indexes; a German-order query ('Müllerstr. 12a') searches the
-    indexes whose meta norm is de-1. Each index is only ever searched with its own normalization."""
+    indexes whose meta norm is de-1. Each index is only ever searched with its own normalization. A number-first
+    query that no US index answers may still name a German house ('77 Unter den Linden'), so the de-1 indexes are
+    asked last, for that street in full."""
     if is_address_query(query):
-        return _find_us(query, Path(geo_directory), limit, near)
+        return (_find_us(query, Path(geo_directory), limit, near)
+                or _find_de_number_first(query, Path(geo_directory), limit, near))
     parts = _parts_de(query)
     if parts is None:
         return []
     return _find_de(parts, Path(geo_directory), limit, near)
 
 
-def _find_de(parts, geo_directory, limit, near):
+def _parts_de_number_first(query):
+    """(number, words, postcode, qualifier words) for a German house written number first ('77 Unter den Linden',
+    '12a Müllerstraße, 13353 Berlin'), or None. The words up to a postcode are the street; without a postcode, where
+    the street ends is left to _find_de_number_first."""
+    tokens = normalize_de(query).split()
+    if len(tokens) < 2 or not re.fullmatch(r'\d+[a-z]?', tokens[0]):
+        return None
+    number, words, postcode, qualifier = tokens[0].upper(), tokens[1:], '', []
+    for position, token in enumerate(words):
+        if re.fullmatch(r'\d{5}', token):
+            words, postcode, qualifier = words[:position], token, words[position + 1:]
+            break
+    return number, words, postcode, qualifier
+
+
+def _find_de_number_first(query, geo_directory, limit, near):
+    """The street must be one stored street in full, not the start of one: '77 Linden' is a US query and must not find
+    Lindenstraße, nor '100 Main' Mainzer Straße. Without a postcode the longest such street wins, and the words after
+    it must name the place, as in '77 Unter den Linden Berlin'."""
+    parts = _parts_de_number_first(query)
+    if parts is None:
+        return []
+    number, words, postcode, qualifier = parts
+    splits = [(words, qualifier)] if postcode else [(words[:count], words[count:]) for count in range(len(words), 0, -1)]
+    for street, rest in splits:
+        if any(re.search(r'[a-z]', word) for word in street):
+            found = _find_de((number, street, postcode, rest), geo_directory, limit, near, whole_street=True)
+            if found:
+                return found
+    return []
+
+
+def _find_de(parts, geo_directory, limit, near, whole_street=False):
     number, words, postcode, qualifier = parts
     street, qualifier = ' '.join(words), ' '.join(qualifier)
     paths = [path for path in sorted((geo_directory / 'addresses').glob('*.sqlite')) if _index_info(path)[0] == DE_NORM]
-    conditions = ['num IN (?, ?)', 'norm >= ?', 'norm < ?']
-    parameters = [number, number.lower(), street, street + '\uffff']
+    if not paths:
+        return []
+    if whole_street:
+        conditions, parameters = ['num IN (?, ?)', 'norm = ?'], [number, number.lower(), street]
+    else:
+        conditions = ['num IN (?, ?)', 'norm >= ?', 'norm < ?']
+        parameters = [number, number.lower(), street, street + '\uffff']
     if postcode:
         conditions.append('zip = ?')
         parameters.append(postcode)

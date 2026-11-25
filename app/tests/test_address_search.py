@@ -591,6 +591,33 @@ class GermanAddressSearchTests(unittest.TestCase):
         self.write_berlin(self.geo / 'addresses' / 'DE-BE.sqlite')
         self.assertEqual([find_addresses(query, self.geo) for query in queries], before)
 
+    def test_number_first_finds_a_german_house_that_no_us_index_has(self):
+        """The search box asks for a US-style address, and the Berlin map on main since 1.1.17 found '77 Unter den
+        Linden' by accident. The German index answers it on purpose once no US index does, but only for a whole stored
+        street: '77 Linden' must not become Lindenstraße or Unter den Linden, and a wrong number or place finds nothing."""
+        rows = {row['id']: row for row in BERLIN}
+        cases = {
+            '77 Unter den Linden': ['linden-77'], '77 Unter den Linden, 10117 Berlin': ['linden-77'],
+            '77 unter den linden berlin': ['linden-77'], '12a Müllerstraße': ['mueller-12a'], '12A Muellerstr.': ['mueller-12a'],
+            '135 Straße des 17. Juni': ['juni-135'], '25 Oranienstr Kreuzberg': ['oranien-25'],
+            '5 Hauptstraße': ['haupt-5-schoeneberg', 'haupt-5-rahnsdorf'], '5 Hauptstraße Rahnsdorf': ['haupt-5-rahnsdorf'],
+            '78 Unter den Linden': [], '12b Müllerstraße': [], '77 Linden': [], '77 Unter den': [], '77 Lindenstr Mitte': [],
+            '25 Oranienstraße Spandau': [], '25 Oranienstraße, 10117 Berlin': [], '10117 Berlin': [],
+        }
+        for query, ids in cases.items():
+            with self.subTest(query=query):
+                found = find_addresses(query, self.geo)
+                self.assertCountEqual([(hit['lat'], hit['lon']) for hit in found], [(rows[i]['lat'], rows[i]['lon']) for i in ids])
+                for hit in found:
+                    self.assertEqual((hit['kind'], hit['source']), ('Street address', BERLIN[0]['source']))
+        self.assertEqual(self.one('77 Unter den Linden')['name'], 'Unter den Linden 77')    # named the German way
+
+    def test_a_us_house_still_wins_a_number_first_query(self):
+        """The German index is asked only when every US index has said no: a US house answers alone, as before."""
+        self.write_us_state('PA', [('5', 'Hauptstrasse', 'Example', 'PA', '19001', 40.1, -75.1)])
+        hit = self.one('5 Hauptstrasse')
+        self.assertEqual((hit['detail'], hit['source']), ('Example, PA, 19001', 'Overture Maps'))
+
     def test_delaware_stays_delaware(self):
         """Bare 'DE' is the US state code: a Delaware query must use DE.sqlite only, never the DE-BE index."""
         self.write_us_state('DE', [('77', 'Linden Street', 'Wilmington', 'DE', '19801', 39.74, -75.55)])

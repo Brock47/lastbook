@@ -113,7 +113,8 @@ With only this map set installed:
 | `Unter den Linden 9999` | the street, never a nearby house |
 | `Kreuzberg`, `10117`, `10117 Berlin`, `Oranienstraße`, `Alexanderplatz` | the locality, the postcode area, the street |
 | `Route 66` | `Straße 66` in Karow, a real numbered Berlin street: with no such house the place search answers |
-| `77 Unter den Linden`, `25 Oranienstr` | nothing: the number first is the US order, and a German index is searched only the German way |
+| `77 Unter den Linden`, `25 Oranienstraße, 10999 Berlin` | the same house: with no US house of that address, the German index is asked for the whole street |
+| `77 Linden`, `100 Main St` | nothing: written number first, a street must be one Berlin street in full, so no US query finds Lindenstraße or Mainzer Straße |
 
 The expectations for German queries, and the US answers that must stay the same with Berlin installed, are in
 `app/tests/fixtures/de_be_queries.json` and `app/tests/test_address_search.py`.
@@ -147,5 +148,6 @@ in the Water preset.
   a German result reads `10117 Berlin-Mitte` (postcode, city, locality).
 - A query may be written `Straße 12`, `Straße 12a` or `12 a`, with `Str.`/`Strasse`/`Straße`,
   umlauts typed or spelled out (`Muellerstrasse`), an optional postcode and an optional `Berlin` or locality, and with
-  numbers inside street names. Not covered: the number first, ranges (`12-14`), a street name split in two
-  (`Oranien Str. 25`) and building parts beyond one letter.
+  numbers inside street names. The number may also come first (`77 Unter den Linden`, `12a Müllerstraße`) when the
+  street is written in full. Not covered: ranges (`12-14`), a street name split in two (`Oranien Str. 25`) and
+  building parts beyond one letter.
