@@ -11,6 +11,8 @@ cannot start a turn of its own), and turns Gemma's tool calls back into the shap
 
 On an integrated Vulkan GPU the runner maps the model file instead of copying it into graphics memory. If a graphics
 load still fails (the device is lost, or it runs out of device memory), the next start uses the processor, once.
+Turning local AI off before that start cancels it. A graphics child that exits before the question records it is
+still started once on the processor, as long as local AI stays on.
 """
 import hashlib
 import json
@@ -277,17 +279,23 @@ class Local:
                 return self.message or 'The local AI is not set up on this computer.'
             if self.state != 'loading':
                 self._spawn()
-        t0 = time.time()
-        # Progress is timestamped by the reader under the same lock. Check the
-        # deadline and stop atomically so progress at the boundary cannot be lost.
-        with self.lock:
-            waiting_for = self.proc
+            # Recorded before this request lets the reader publish the exit. If the child has already
+            # gone, this is None and fallback_pending is set, and the loop still starts the processor once.
+            waiting_for = self._record_child()
+            t0 = time.time()
         while True:
             with self.lock:
+                # Off after a failed graphics child, or at any later point in this wait: do not start
+                # the processor. The model stays off and the question ends with that.
+                if not self.enabled():
+                    self.fallback_pending = False
+                    return 'The local AI is turned off.'
                 # A graphics load has just exited. Start the processor in this same wait, instead of
                 # handing the question an error and trying the graphics chip again next time.
                 # A question that was stopped does not start it; the next one does.
-                if getattr(self, 'fallback_pending', False) and self.proc is not waiting_for:
+                # proc is None when the recorded child has exited, and also when it exited before it
+                # was recorded: either way this request starts the processor once.
+                if getattr(self, 'fallback_pending', False) and self.proc is None:
                     if cancelled():
                         self.fallback_pending = False
                         return 'stopped'
@@ -301,6 +309,8 @@ class Local:
                     return None
                 if self.state != 'loading':
                     return self.message or 'The local AI did not start.'
+                # Progress is timestamped by the reader under the same lock. Check the
+                # deadline and stop atomically so progress at the boundary cannot be lost.
                 if time.time() - max(t0, self.t_progress) >= START_WAIT:
                     # Detach atomically with the deadline check, then let the
                     # potentially slow child shutdown happen outside this lock.
@@ -317,6 +327,11 @@ class Local:
             if on_wait:
                 on_wait(pct)
             time.sleep(0.25)
+
+    def _record_child(self):
+        """The child this wait is following. The caller holds the lock, just after the start.
+        None means that child has already exited."""
+        return self.proc
 
     def _spawn(self):
         import queue
@@ -439,6 +454,8 @@ class Local:
         else:
             self.stop('turned off')
             with self.lock:
+                # The graphics child may already have failed. Do not leave a processor start waiting.
+                self.fallback_pending = False
                 self.state, self.message = 'off', ''
 
     def _idle_watch(self):

@@ -5,8 +5,10 @@ import hashlib
 import json
 import queue
 import tempfile
+import threading
 import time
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
@@ -298,6 +300,242 @@ class GraphicsFallback(Base):
         self.assertEqual(len(self.launched), 1)
         self.assertFalse(self.local.cpu_fallback)
         self.assertNotEqual(self.local.state, 'ready')
+
+
+class _Pipe:
+    """Lines a fake child writes. After those, it ends, or waits until the test lets it go."""
+
+    def __init__(self, lines, close):
+        self.lines, self.close, self.i = list(lines), close, 0
+        self.hold = threading.Event()
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.i < len(self.lines):
+            line = self.lines[self.i]
+            self.i += 1
+            return line
+        if self.close:
+            raise StopIteration
+        self.hold.wait()
+        raise StopIteration
+
+
+class _Child:
+    """A stand-in for the model process. The test decides when its reader runs."""
+
+    def __init__(self, lines, code, close=True):
+        self.stdout = _Pipe(lines, close)
+        self.stdin = mock.Mock()
+        self.code = code
+
+    def wait(self, timeout=None):
+        return self.code
+
+    def poll(self):
+        return None
+
+
+class _Library:
+    """Enough of a library for one chat turn that finds nothing, so the question reaches the model wait."""
+
+    STOP = set()
+
+    def catalog(self):
+        return {'by_id': {}, 'by_path': {}}
+
+    def query_groups(self, _q):
+        return '', []
+
+
+class RetryOrder(Base):
+    """The graphics child's exit, Off, and the wait that would start the processor, in an order the test chooses.
+    The child is fake. Events pass the turn from one side to the other; nothing here waits on the clock."""
+
+    def setUp(self):
+        super().setUp()
+        del self.local._spawn
+        self.local.state, self.local.path = 'stopped', self.model
+        self.local.fit = {'fits': True, 'n_gpu_layers': 31}
+        self.launched, self.held = [], []
+        self._children = []
+        self.addCleanup(self._release)
+
+    def _release(self):
+        for child in self._children:
+            child.stdout.hold.set()
+
+    def child(self, lines, code, close=True):
+        child = _Child(lines, code, close)
+        self._children.append(child)
+        return child
+
+    @contextmanager
+    def running(self, scripts, sleep):
+        scripts = list(scripts)
+        real_start = llm_local.threading.Thread.start
+
+        def start(thread):
+            if thread.name == 'local-ai-read':
+                self.held.append(thread)
+                return
+            real_start(thread)
+
+        def popen(argv, **_kw):
+            cmd = [str(part) for part in argv]
+            self.launched.append(cmd)
+            if not scripts:
+                raise AssertionError('the model was started again: ' + ' '.join(cmd))
+            return scripts.pop(0)
+
+        with mock.patch.object(llm_local.paths, 'DATA', self.dir), \
+                mock.patch.object(llm_local.subprocess, 'Popen', popen), \
+                mock.patch.object(llm_local.threading.Thread, 'start', start), \
+                mock.patch.object(llm_local.time, 'sleep', sleep):
+            yield
+
+    def test_off_between_graphics_exit_and_processor_retry_ends_the_question(self):
+        """Exit, then Off, then the point where the processor would start: no child, no answer."""
+        lost = json.dumps({'ev': 'error', 'code': 'load', 'msg': 'the model could not be loaded'}).encode()
+        parked, release = threading.Event(), threading.Event()
+        box = {}
+
+        def sleep(_s):
+            # The graphics child is already recorded and this question is parked. The other side exits it and turns
+            # local AI off, then opens `release`. That is the retry point. The time limit only reports a deadlock.
+            if parked.is_set():
+                raise AssertionError('the question waited again after local AI was turned off')
+            parked.set()
+            if not release.wait(30):
+                raise AssertionError('Off was never recorded')
+
+        def question():
+            try:
+                import assistant
+                events = []
+
+                def generate(*_a, **_k):
+                    raise AssertionError('an answer was generated')
+
+                with mock.patch.object(assistant, 'LOCAL', self.local), \
+                        mock.patch.object(assistant, 'S', _Library()), \
+                        mock.patch.object(assistant, 'INDEX', None), \
+                        mock.patch.object(assistant, 'CHOSEN', False), \
+                        mock.patch.object(assistant, 'encyclopedia_hits', lambda *_a, **_k: []), \
+                        mock.patch.object(self.local, 'generate', generate):
+                    assistant.chat([{'role': 'user', 'content': 'How do I store water?'}], None,
+                                   events.append, lambda: False)
+                box['events'] = events
+            except Exception as exc:
+                box['error'] = exc
+
+        with self.running([self.child([lost], 4)], sleep):
+            waiter = threading.Thread(target=question, daemon=True)
+            waiter.start()
+            arrived = False
+            try:
+                arrived = parked.wait(30)
+                if arrived:
+                    self.held[0].run()
+                    self.assertTrue(self.local.fallback_pending)
+                    self.assertIsNone(self.local.proc)
+                    self.local.set_enabled(False)
+            finally:
+                release.set()
+            waiter.join(30)
+            self.assertFalse(waiter.is_alive(), 'the question did not finish')
+        if box.get('error'):
+            raise box['error']
+        self.assertTrue(arrived, 'the question never reached the wait')
+        events = box['events']
+        self.assertFalse(any(event.get('type') in ('delta', 'done') for event in events))
+        self.assertIn({'type': 'error', 'error': 'model_unavailable', 'text': 'The local AI is turned off.'}, events)
+        self.assertEqual(len(self.launched), 1)
+        self.assertNotIn('--cpu-only', self.launched[0])
+        self.assertEqual(self.local.state, 'off')
+        self.assertFalse(self.local.enabled())
+        self.assertFalse(self.local.fallback_pending)
+        self.assertFalse(self.local.available())
+
+    def test_graphics_exit_before_the_wait_records_the_child_starts_one_processor_child(self):
+        """The child exits inside the record, before the wait has a process to follow. One processor child, and no second."""
+        lost = json.dumps({'ev': 'error', 'code': 'load', 'msg': 'the model could not be loaded'}).encode()
+        seen = []
+
+        def record():
+            self.held.pop(0).run()
+            seen.append((self.local.proc, self.local.fallback_pending, self.local.cpu_fallback))
+            return self.local.proc
+
+        def sleep(_s):
+            # The processor child is the one now running. Mark it ready so the wait can finish.
+            with self.local.lock:
+                self.local.state = 'ready'
+
+        self.local._record_child = record
+        with self.running([self.child([lost], 4), self.child([], 0)], sleep):
+            why = self.local.ensure_running()
+        self.assertEqual(seen, [(None, True, True)])
+        self.assertIsNone(why)
+        self.assertEqual(self.local.state, 'ready')
+        self.assertNotIn('--cpu-only', self.launched[0])
+        self.assertIn('--cpu-only', self.launched[1])
+        self.assertEqual(len(self.launched), 2)
+
+    def test_the_usual_order_still_recovers_on_the_processor_once(self):
+        """Record the graphics child, then it exits, then one processor child. The first start is the ordinary graphics one."""
+        lost = json.dumps({'ev': 'error', 'code': 'load', 'msg': 'the model could not be loaded'}).encode()
+        order = []
+        real = self.local._record_child
+
+        def record():
+            order.append('record' if self.local.proc is not None else 'record-gone')
+            return real()
+
+        def sleep(_s):
+            if 'exit' not in order:
+                order.append('exit')
+                self.held[0].run()
+                return
+            order.append('ready')
+            with self.local.lock:
+                self.local.state = 'ready'
+
+        self.local._record_child = record
+        with self.running([self.child([lost], 4), self.child([], 0)], sleep):
+            why = self.local.ensure_running()
+        self.assertIsNone(why)
+        self.assertEqual(order, ['record', 'exit', 'ready'])
+        self.assertEqual(len(self.launched), 2)
+        self.assertNotIn('--cpu-only', self.launched[0])
+        self.assertIn('--cpu-only', self.launched[1])
+        self.assertNotIn('mmap', ' '.join(self.launched[0]))
+        self.assertEqual(self.local.state, 'ready')
+
+    def test_a_fast_exit_that_is_not_a_graphics_failure_does_not_start_the_processor(self):
+        """The runner, not this retry, chooses a discrete GPU's load. An exit that is not a failed graphics load
+        still does not start the processor, even when it lands before the wait records the child."""
+        self.local.fit = {'fits': True, 'n_gpu_layers': 0}
+        lost = json.dumps({'ev': 'error', 'code': 'load', 'msg': 'the model could not be loaded'}).encode()
+
+        def record():
+            self.held.pop(0).run()
+            return self.local.proc
+
+        def sleep(_s):
+            raise AssertionError('the request waited for a processor child')
+
+        self.local._record_child = record
+        with self.running([self.child([lost], 4)], sleep):
+            why = self.local.ensure_running()
+        self.assertIn('could not load the model file', why)
+        self.assertEqual(len(self.launched), 1)
+        self.assertNotIn('--cpu-only', self.launched[0])
+        self.assertFalse(self.local.cpu_fallback)
+        self.assertFalse(self.local.fallback_pending)
+        self.assertEqual(self.local.state, 'error')
 
 
 if __name__ == '__main__':
