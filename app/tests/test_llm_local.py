@@ -350,9 +350,8 @@ class _Library:
         return '', []
 
 
-class RetryOrder(Base):
-    """The graphics child's exit, Off, and the wait that would start the processor, in an order the test chooses.
-    The child is fake. Events pass the turn from one side to the other; nothing here waits on the clock."""
+class _WaitHarness(Base):
+    """A fake child and events, so a test can order the graphics exit and the questions waiting on it."""
 
     def setUp(self):
         super().setUp()
@@ -395,6 +394,11 @@ class RetryOrder(Base):
                 mock.patch.object(llm_local.threading.Thread, 'start', start), \
                 mock.patch.object(llm_local.time, 'sleep', sleep):
             yield
+
+
+class RetryOrder(_WaitHarness):
+    """The graphics child's exit, Off, and the wait that would start the processor, in an order the test chooses.
+    The child is fake. Events pass the turn from one side to the other; nothing here waits on the clock."""
 
     def test_off_between_graphics_exit_and_processor_retry_ends_the_question(self):
         """Exit, then Off, then the point where the processor would start: no child, no answer."""
@@ -536,6 +540,222 @@ class RetryOrder(Base):
         self.assertFalse(self.local.cpu_fallback)
         self.assertFalse(self.local.fallback_pending)
         self.assertEqual(self.local.state, 'error')
+
+
+_LOST = json.dumps({'ev': 'error', 'code': 'load', 'msg': 'the model could not be loaded'}).encode()
+
+
+class _Lane:
+    """One waiting question. Each sleep parks at a new step; the test opens that step.
+    The 30 second limit only reports a deadlock. The events decide the order."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._next = 0
+        self._arrived, self._release = {}, {}
+        self.why, self.error, self.events = None, None, None
+        self.finished = threading.Event()
+
+    def park(self):
+        with self._lock:
+            n = self._next
+            self._next += 1
+            arrived = self._arrived.setdefault(n, threading.Event())
+            release = self._release.setdefault(n, threading.Event())
+        arrived.set()
+        if not release.wait(30):
+            raise AssertionError('a waiting question was not released')
+
+    def until(self, n):
+        with self._lock:
+            arrived = self._arrived.setdefault(n, threading.Event())
+        if not arrived.wait(30):
+            raise AssertionError('a question did not reach the wait')
+
+    def open(self, n):
+        with self._lock:
+            release = self._release.setdefault(n, threading.Event())
+        release.set()
+
+
+class SharedStartup(_WaitHarness):
+    """Two questions already waiting on one graphics start share the single processor retry."""
+
+    def _cpus(self):
+        return [cmd for cmd in self.launched if '--cpu-only' in cmd]
+
+    def _finish(self, lane):
+        if not lane.finished.wait(30):
+            raise AssertionError('a question did not finish')
+        if lane.error:
+            raise lane.error
+
+    def _ask(self, lanes, cancelled=lambda: False):
+        lane = _Lane()
+
+        def run():
+            try:
+                lane.why = self.local.ensure_running(cancelled=cancelled)
+            except Exception as exc:
+                lane.error = exc
+            finally:
+                lane.finished.set()
+
+        thread = threading.Thread(target=run, daemon=True)
+        lanes[thread] = lane
+        thread.start()
+        return lane
+
+    def _parked_pair(self, lanes):
+        """Two questions have recorded the graphics child and are waiting. The reader has not run."""
+        first = self._ask(lanes)
+        first.until(0)
+        second = self._ask(lanes)
+        second.until(0)
+        self.assertEqual(len(self.launched), 1)
+        self.assertNotIn('--cpu-only', self.launched[0])
+        self.assertEqual(len(self.held), 1)
+        return first, second
+
+    def test_two_questions_share_one_processor_retry_and_both_finish(self):
+        lanes = {}
+
+        def sleep(_s):
+            lanes[threading.current_thread()].park()
+
+        with self.running([self.child([_LOST], 4), self.child([], 0)], sleep):
+            first, second = self._parked_pair(lanes)
+            self.held[0].run()
+            first.open(0)
+            first.until(1)
+            self.assertEqual(len(self._cpus()), 1)
+            with self.local.lock:
+                self.local.state = 'ready'
+            first.open(1)
+            second.open(0)
+            self._finish(first)
+            self._finish(second)
+        self.assertIsNone(first.why)
+        self.assertIsNone(second.why)
+        self.assertEqual(len(self.launched), 2)
+        self.assertEqual(len(self._cpus()), 1)
+        self.assertEqual(self.local.state, 'ready')
+
+    def test_stopping_one_question_before_the_retry_leaves_the_other(self):
+        lanes = {}
+        stopped = threading.Event()
+
+        def sleep(_s):
+            lanes[threading.current_thread()].park()
+
+        with self.running([self.child([_LOST], 4), self.child([], 0)], sleep):
+            first = self._ask(lanes, cancelled=stopped.is_set)
+            first.until(0)
+            second = self._ask(lanes)
+            second.until(0)
+            self.held[0].run()
+            stopped.set()
+            first.open(0)
+            self._finish(first)
+            self.assertEqual(first.why, 'stopped')
+            self.assertEqual(self._cpus(), [])
+            self.assertTrue(self.local.fallback_pending)
+            second.open(0)
+            second.until(1)
+            self.assertEqual(len(self._cpus()), 1)
+            with self.local.lock:
+                self.local.state = 'ready'
+            second.open(1)
+            self._finish(second)
+        self.assertIsNone(second.why)
+        self.assertEqual(len(self.launched), 2)
+        self.assertEqual(len(self._cpus()), 1)
+        self.assertEqual(self.local.state, 'ready')
+
+    def test_stopping_one_question_after_the_retry_leaves_the_other(self):
+        lanes = {}
+        stopped = threading.Event()
+
+        def sleep(_s):
+            lanes[threading.current_thread()].park()
+
+        with self.running([self.child([_LOST], 4), self.child([], 0)], sleep):
+            first = self._ask(lanes, cancelled=stopped.is_set)
+            first.until(0)
+            second = self._ask(lanes)
+            second.until(0)
+            self.held[0].run()
+            first.open(0)
+            first.until(1)
+            self.assertEqual(len(self._cpus()), 1)
+            stopped.set()
+            first.open(1)
+            self._finish(first)
+            self.assertEqual(first.why, 'stopped')
+            self.assertEqual(len(self._cpus()), 1)
+            self.assertEqual(self.local.state, 'loading')
+            with self.local.lock:
+                self.local.state = 'ready'
+            second.open(0)
+            self._finish(second)
+        self.assertIsNone(second.why)
+        self.assertEqual(len(self.launched), 2)
+        self.assertEqual(len(self._cpus()), 1)
+
+    def test_off_while_two_questions_wait_starts_no_processor_and_both_end(self):
+        import assistant
+        lanes = {}
+
+        def sleep(_s):
+            lanes[threading.current_thread()].park()
+
+        def generate(*_a, **_k):
+            raise AssertionError('an answer was generated')
+
+        def chat(lane, text):
+            def run():
+                try:
+                    events = []
+                    assistant.chat([{'role': 'user', 'content': text}], None, events.append, lambda: False)
+                    lane.events = events
+                except Exception as exc:
+                    lane.error = exc
+                finally:
+                    lane.finished.set()
+
+            thread = threading.Thread(target=run, daemon=True)
+            lanes[thread] = lane
+            thread.start()
+            return thread
+
+        with self.running([self.child([_LOST], 4)], sleep), \
+                mock.patch.object(assistant, 'LOCAL', self.local), \
+                mock.patch.object(assistant, 'S', _Library()), \
+                mock.patch.object(assistant, 'INDEX', None), \
+                mock.patch.object(assistant, 'CHOSEN', False), \
+                mock.patch.object(assistant, 'encyclopedia_hits', lambda *_a, **_k: []), \
+                mock.patch.object(self.local, 'generate', generate):
+            first, second = _Lane(), _Lane()
+            chat(first, 'How do I store water?')
+            first.until(0)
+            chat(second, 'How do I boil water?')
+            second.until(0)
+            self.held[0].run()
+            self.assertTrue(self.local.fallback_pending)
+            self.local.set_enabled(False)
+            first.open(0)
+            second.open(0)
+            self._finish(first)
+            self._finish(second)
+        for lane in (first, second):
+            self.assertFalse(any(event.get('type') in ('delta', 'done') for event in lane.events))
+            self.assertIn({'type': 'error', 'error': 'model_unavailable', 'text': 'The local AI is turned off.'}, lane.events)
+        self.assertEqual(len(self.launched), 1)
+        self.assertEqual(self._cpus(), [])
+        self.assertEqual(self.local.state, 'off')
+        self.assertFalse(self.local.enabled())
+        self.assertFalse(self.local.fallback_pending)
+        self.assertFalse(self.local.available())
 
 
 if __name__ == '__main__':

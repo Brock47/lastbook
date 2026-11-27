@@ -11,8 +11,9 @@ cannot start a turn of its own), and turns Gemma's tool calls back into the shap
 
 On an integrated Vulkan GPU the runner maps the model file instead of copying it into graphics memory. If a graphics
 load still fails (the device is lost, or it runs out of device memory), the next start uses the processor, once.
-Turning local AI off before that start cancels it. A graphics child that exits before the question records it is
-still started once on the processor, as long as local AI stays on.
+Turning local AI off before that start cancels it for every question still waiting. A graphics child that exits
+before the question records it is still started once on the processor, as long as local AI stays on. Questions
+already waiting share that one processor start. Stopping one of them leaves the others on it.
 """
 import hashlib
 import json
@@ -292,18 +293,23 @@ class Local:
                     return 'The local AI is turned off.'
                 # A graphics load has just exited. Start the processor in this same wait, instead of
                 # handing the question an error and trying the graphics chip again next time.
-                # A question that was stopped does not start it; the next one does.
+                # A question that was stopped does not start it, and does not take the retry away from
+                # one that is still waiting. The next question starts it if nobody else did.
                 # proc is None when the recorded child has exited, and also when it exited before it
-                # was recorded: either way this request starts the processor once.
+                # was recorded: either way one processor child is enough for every question waiting.
                 if getattr(self, 'fallback_pending', False) and self.proc is None:
                     if cancelled():
-                        self.fallback_pending = False
                         return 'stopped'
                     self._spawn()
                     waiting_for = self.proc
                     t0 = time.time()
                 if self.proc is not waiting_for:
-                    return self.message or 'The local AI start was interrupted.'
+                    # Another question already started the shared processor child. Follow that one.
+                    if self.proc is not None and self.state in ('loading', 'ready'):
+                        waiting_for = self.proc
+                        t0 = time.time()
+                    else:
+                        return self.message or 'The local AI start was interrupted.'
                 if self.state == 'ready':
                     self.last_used = time.time()
                     return None
